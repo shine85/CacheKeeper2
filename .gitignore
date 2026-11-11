@@ -1,0 +1,9 @@
+/BK/
+/tmp/
+/memory/
+/.theos/
+/packages/
+*.deb
+__pycache__/
+*.pyc
+.DS_Store

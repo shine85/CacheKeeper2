@@ -1,0 +1,141 @@
+#import <Foundation/Foundation.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#import "../AxsCacheKeeperPolicy.h"
+#import "../AxsCacheKeeperSweep.h"
+#import "../AxsCacheKeeperNetworkCache.h"
+#import "../AxsCacheKeeperDirectories.h"
+#import <objc/runtime.h>
+
+static void require(BOOL condition, NSString *message) {
+    if (!condition) { fprintf(stderr, "FAIL: %s\n", message.UTF8String); exit(1); }
+}
+static void writeFile(NSString *path) {
+    require([@"cache payload" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil], @"创建测试文件");
+}
+static void writeMedia(NSString *path) {
+    const unsigned char image[]={0x89,'P','N','G',13,10,26,10,0,0,0,0};
+    require([[NSData dataWithBytes:image length:sizeof(image)] writeToFile:path atomically:YES], @"创建可识别的缓存文件");
+}
+
+int main(int argc, const char *argv[]) {
+    @autoreleasepool {
+        require(argc == 2, @"需要传入项目 tmp 内的测试目录");
+        NSString *fixture = [NSURL fileURLWithPath:@(argv[1])].URLByResolvingSymlinksInPath.path;
+        NSFileManager *fm = NSFileManager.defaultManager;
+        require(![fm fileExistsAtPath:fixture], @"测试目录必须是新目录");
+        require([fm createDirectoryAtPath:fixture withIntermediateDirectories:YES attributes:nil error:nil], @"创建测试目录");
+        NSString *bundle = @"test.cache.app";
+        NSDictionary *selection = @{bundle:@[@"Library/Caches/a", @"Library/Caches", @"Library/Caches/a",
+            @"Library/Application Support", @"Library/Caches/../Preferences", @"Library/CachesOther"]};
+        require([axs_cachekeeper_selected_paths(selection, @{bundle:@YES}, bundle) isEqual:@[@"Library/Caches"]], @"过滤保护目录并去掉父子重复选择");
+        require(!axs_cachekeeper_selected_paths(selection, @{bundle:@NO}, bundle).count, @"关闭总开关禁止处理");
+        require(!axs_cachekeeper_selected_paths(selection, @{}, bundle).count, @"只有目录选择、没有明确总开关时必须关闭");
+        require(!axs_cachekeeper_selected_paths(selection, nil, bundle).count, @"总开关配置文件缺失时必须关闭");
+        require(!axs_cachekeeper_app_enabled(nil) && !axs_cachekeeper_app_enabled(@{}), @"新 APP 与损坏状态默认关闭");
+        NSDictionary *explicitOn=@{@"enabled":@YES,@"mode":@"auto"};
+        require(axs_cachekeeper_app_enabled(explicitOn) && !axs_cachekeeper_selected_paths(@{bundle:@[]},@{bundle:explicitOn},bundle).count, @"取消全部目录不伪装成总开关关闭；明确开启与待选目录分别显示");
+        require(!axs_cachekeeper_app_enabled(axs_cachekeeper_app_state(nil,NO)), @"仅设置模式不能从缺省状态开启 APP");
+        require(!axs_cachekeeper_selected_paths(@{@"com.tencent.xin":@[@"Library/Caches"]}, @{}, @"com.tencent.xin").count, @"未开启微信不得因残留目录记录被清理");
+        require([axs_cachekeeper_selected_paths(selection, @{bundle:@{@"enabled":@YES,@"restrict":@NO}}, bundle) count] == 1, @"关闭限写不能关闭自动清理");
+        require(!axs_cachekeeper_wants_restriction(@{@"enabled":@YES,@"restrict":@NO}), @"独立限写开关");
+        require([axs_cachekeeper_app_state(@{@"enabled":@YES,@"restrict":@NO}, NO)[@"mode"] isEqual:@"clean"], @"总开关修改保留模式并兼容旧配置");
+        require(!axs_cachekeeper_wants_cleanup(@{@"mode":@"prevent"}), @"只禁止不能删除文件");
+        require([axs_cachekeeper_parent_paths(@[@"tmp/a/b",@"tmp",@"tmp/a",@"Library/Caches/video",@"Library/Caches"]) isEqual:@[@"Library/Caches",@"tmp"]], @"父目录优先忽略所有后代");
+        for (NSString *protectedPath in @[@"tmp/login/avatar.jpg",@"tmp/WebKit/cache.tmp",@"Library/Caches/Cache.db",@"Library/Caches/Cookies/file.tmp",@"Library/Preferences"]) {
+            require(!axs_cachekeeper_cache_path(protectedPath), @"受保护目录不可纳入清理");
+        }
+        struct stat ageInfo = {0};
+        ageInfo.st_birthtimespec.tv_sec=100;ageInfo.st_mtimespec.tv_sec=100;ageInfo.st_ctimespec.tv_sec=100;
+        require(!axs_cachekeeper_old_enough(ageInfo,159) && axs_cachekeeper_old_enough(ageInfo,160), @"60 秒边界");
+        ageInfo.st_mtimespec.tv_sec=155;
+        require(!axs_cachekeeper_old_enough(ageInfo,160), @"已有文件刚追加也必须保留");
+        require(!axs_cachekeeper_selected_paths(@{}, @{}, bundle).count, @"未选中 APP 不处理");
+        require(axs_cachekeeper_can_clean(selection, @{bundle:@YES}, bundle), @"明确开启的 APP 可以清理");
+        require(!axs_cachekeeper_can_clean(selection, @{}, bundle) &&
+            !axs_cachekeeper_can_clean(selection, @{bundle:@{@"enabled":@YES,@"mode":@"prevent"}}, bundle), @"快捷操作也不能绕过开启状态或只禁止模式");
+        NSDictionary *appRows=@{@"system":@{@"bundle":@"com.apple.mobilesafari",@"name":@"Safari"},
+            @"wechat":@{@"bundle":@"com.tencent.xin",@"name":@"微信"}};
+        require(axs_cachekeeper_application_entry(appRows[@"system"][@"bundle"],@"Safari",@"System",[NSURL fileURLWithPath:@"/Applications/MobileSafari.app"]) != nil, @"已安装系统 APP 也列出");
+        require(axs_cachekeeper_application_entry(appRows[@"wechat"][@"bundle"],@"微信",@"User",nil) != nil, @"第三方 APP 不按名称排除");
+        require(!axs_cachekeeper_application_entry(@"service",@"服务",@"Plugin",[NSURL fileURLWithPath:@"/Plugins/test.appex"]), @"扩展服务不冒充已安装 APP");
+        NSString *configFile=[fixture stringByAppendingPathComponent:@"appEnabled.plist"];
+        require([@"broken configuration" writeToFile:configFile atomically:YES encoding:NSUTF8StringEncoding error:nil], @"配置损坏夹具");
+        require(!axs_cachekeeper_edit_configuration(configFile) && [[NSString stringWithContentsOfFile:configFile encoding:NSUTF8StringEncoding error:nil] isEqual:@"broken configuration"], @"拒绝覆盖损坏的既有配置");
+        require(axs_cachekeeper_edit_configuration([fixture stringByAppendingPathComponent:@"new.plist"]) != nil, @"允许建立新配置");
+        require(!axs_cachekeeper_cache_path(@"/Library/Caches") && !axs_cachekeeper_cache_path(@"Library/Caches//a"), @"拒绝非规范路径");
+        NSString *summary = axs_cachekeeper_summary(@{@"rows":@[@{}]}, @{@"phase":@"auto", @"message":@"限写失败",
+            @"removed":@3, @"bytes":@1048576, @"failed":@1});
+        require([summary containsString:@"1 个"] && [summary containsString:@"3 个"] && [summary containsString:@"限写失败"], @"检测与清理结果同时可见");
+
+        NSString *home=[fixture stringByAppendingPathComponent:@"app-home"];
+        NSArray *directoryRoots=@[@"tmp",@"Library/Caches",@"Library/Logs",@"Library/Application Support",@"Library/HTTPStorages",@"Library/WebKit",@"Library/Cookies",@"Library/SplashBoard",@"Library/Saved Application State",@"Documents",@"CustomData",@".cache"];
+        for (NSString *relative in directoryRoots) require([fm createDirectoryAtPath:[home stringByAppendingPathComponent:[relative stringByAppendingPathComponent:@"child/deep"]] withIntermediateDirectories:YES attributes:nil error:nil], @"目录扫描夹具");
+        NSError *scanError=nil;
+        NSArray *found=axs_cachekeeper_scan_directories([NSURL fileURLWithPath:home],&scanError);
+        require(!scanError && [NSSet setWithArray:found].count==directoryRoots.count && [[NSSet setWithArray:found] isEqual:[NSSet setWithArray:directoryRoots]], @"列出全部一级分类，包括日志、网络状态、快照和自定义目录，忽略所有后代");
+        require([axs_cachekeeper_directory_description(@"Library/Application Support") containsString:@"业务数据"] &&
+            !axs_cachekeeper_cache_path(@"Library/Application Support"), @"业务数据明确标注且不可自动清理");
+        NSArray *largeFirst=axs_cachekeeper_size_ordered_rows(@[@{@"path":@"tmp",@"bytes":@1},@{@"path":@"Documents",@"bytes":@500},@{@"path":@"tmp/child",@"bytes":@999}]);
+        require(largeFirst.count==2 && [largeFirst[0][@"path"] isEqual:@"Documents"], @"去重后按占用降序便于定位");
+
+        NSString *cache = [fixture stringByAppendingPathComponent:@"cache"];
+        require([fm createDirectoryAtPath:cache withIntermediateDirectories:NO attributes:nil error:nil], @"创建缓存根");
+        NSString *outside = [fixture stringByAppendingPathComponent:@"user-document"];
+        writeFile(outside);
+        writeMedia([cache stringByAppendingPathComponent:@"old.cache"]);
+        writeMedia([cache stringByAppendingPathComponent:@"new.tmp"]);
+        writeFile([cache stringByAppendingPathComponent:@"session.cache"]);
+        writeFile([cache stringByAppendingPathComponent:@"business.sqlite"]);
+        writeFile([cache stringByAppendingPathComponent:@"unknown-data"]);
+        writeFile([cache stringByAppendingPathComponent:@"000003.log"]);
+        NSString *disguised=[cache stringByAppendingPathComponent:@"opaque.cache"];
+        require([@"SQLite format 3\0payload" writeToFile:disguised atomically:YES encoding:NSUTF8StringEncoding error:nil], @"数据库内容测试");
+        AxsCacheKeeperSweep *fresh = [[AxsCacheKeeperSweep alloc] initWithRoot:cache];
+        [fresh advance:30 shouldContinue:^BOOL { return YES; }];
+        require(fresh.removed==0 && [fm fileExistsAtPath:[cache stringByAppendingPathComponent:@"new.tmp"]], @"真实新文件不删除");
+        require(symlink(outside.fileSystemRepresentation, [cache stringByAppendingPathComponent:@"link"].fileSystemRepresentation) == 0, @"创建链接测试边界");
+        NSTimeInterval future=NSDate.date.timeIntervalSince1970+120;
+        AxsCacheKeeperSweep *sweep = [[AxsCacheKeeperSweep alloc] initWithRoot:cache clock:^NSTimeInterval { return future; }];
+        for (NSUInteger pass = 0; !sweep.complete && pass < 20; pass++) {
+            [sweep advance:1 shouldContinue:^BOOL { return YES; }];
+        }
+        require(sweep.complete && sweep.removed == 2 && sweep.failed == 0, @"单项分批仍能完成遍历并删除新旧缓存");
+        require([fm fileExistsAtPath:outside] && [fm fileExistsAtPath:cache], @"保留根目录与链接外用户文件");
+        require([fm fileExistsAtPath:[cache stringByAppendingPathComponent:@"business.sqlite"]] &&
+            [fm fileExistsAtPath:[cache stringByAppendingPathComponent:@"session.cache"]] && [fm fileExistsAtPath:disguised], @"数据库与登录态不删除");
+        require([fm fileExistsAtPath:[cache stringByAppendingPathComponent:@"000003.log"]], @"未知数据库 WAL 不因 log 后缀删除");
+        NSString *pending = [cache stringByAppendingPathComponent:@"pending"];
+        writeFile(pending);
+        AxsCacheKeeperSweep *cancelled = [[AxsCacheKeeperSweep alloc] initWithRoot:cache];
+        [cancelled advance:10 shouldContinue:^BOOL { return NO; }];
+        require(cancelled.cancelled && [fm fileExistsAtPath:pending], @"APP 重启或开关关闭后停止删除");
+
+        NSString *journal = [fixture stringByAppendingPathComponent:@"permissions.plist"];
+        struct stat info;
+        require(!lstat(cache.fileSystemRepresentation,&info), @"读取原目录身份");
+        require([@{cache:@{@"inode":@(info.st_ino),@"device":@(info.st_dev),@"mode":@0770}} writeToFile:journal atomically:YES], @"建立旧版本权限恢复记录");
+        chmod(cache.fileSystemRepresentation, 0550);
+        NSDictionary *restored = axs_cachekeeper_restore_paths(@[cache], journal);
+        require(!lstat(cache.fileSystemRepresentation, &info) && (info.st_mode & 0777) == 0770 && [restored[@"failed"] unsignedIntegerValue] == 0, @"精确恢复原目录权限");
+        require([@"invalid journal" writeToFile:journal atomically:YES encoding:NSUTF8StringEncoding error:nil], @"损坏记录测试");
+        NSDictionary *rejected = axs_cachekeeper_restore_paths(@[cache], journal);
+        require([rejected[@"failed"] unsignedIntegerValue] > 0 && !lstat(cache.fileSystemRepresentation, &info) && (info.st_mode & 0777) == 0770, @"损坏记录不能改变目录权限");
+
+        IMP originalSetter=method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(setDiskCapacity:)));
+        IMP originalInitializer=method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(initWithMemoryCapacity:diskCapacity:diskPath:)));
+        require(axs_cachekeeper_configure_network_cache(NO), @"未启用状态可直接返回");
+        require(originalSetter==method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(setDiskCapacity:))) &&
+            originalInitializer==method_getImplementation(class_getInstanceMethod(NSURLCache.class,@selector(initWithMemoryCapacity:diskCapacity:diskPath:))), @"未启用时不安装 NSURLCache Hook");
+        require(axs_cachekeeper_configure_network_cache(YES), @"网络缓存禁止可应用");
+        NSURLCache *network=[[NSURLCache alloc] initWithMemoryCapacity:1048576 diskCapacity:8388608 diskPath:[fixture stringByAppendingPathComponent:@"network"]];
+        require(network.diskCapacity==0 && network.memoryCapacity==1048576, @"新实例禁止磁盘缓存但保留内存容量");
+        network.diskCapacity=16777216;
+        require(network.diskCapacity==0, @"APP 不能立即把禁止状态覆盖");
+        require(axs_cachekeeper_configure_network_cache(NO) && network.diskCapacity==16777216, @"关闭后恢复 APP 最新请求的容量");
+        network.diskCapacity=33554432;
+        require(axs_cachekeeper_configure_network_cache(NO) && network.diskCapacity==33554432, @"关闭后重复刷新不得重写 APP 容量");
+        puts("PASS: configuration, modes, deduplication, age, protected files, cleanup, cancellation, permission restoration and URLCache");
+    }
+    return 0;
+}
