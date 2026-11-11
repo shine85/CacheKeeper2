@@ -1,6 +1,32 @@
 #import "AxsCacheKeeperDirectories.h"
 #import "AxsCacheKeeperPolicy.h"
+#import "AxsCacheKeeperFileAccess.h"
 #include <errno.h>
+
+NSArray<NSString *> *axs_cachekeeper_discover_cache_roots(NSURL *home, NSError **error) {
+    if (error) *error=nil;
+    if (![home isKindOfClass:NSURL.class] || !home.isFileURL) {
+        if (error) *error=[NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil];
+        return @[];
+    }
+    NSMutableArray *paths=[NSMutableArray new];
+    NSMutableSet *identities=[NSMutableSet new];
+    for (NSString *relative in axs_cachekeeper_cache_roots()) {
+        NSString *path=[home.path stringByAppendingPathComponent:relative];
+        int fd=axs_cachekeeper_open_directory(path);
+        if (fd<0) {
+            if (errno!=ENOENT && errno!=ENOTDIR && error && !*error) *error=[NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"无法检查缓存目录 %@",relative]}];
+            continue;
+        }
+        struct stat info;
+        if (!fstat(fd,&info)) {
+            NSArray *identity=@[@(info.st_dev),@(info.st_ino)];
+            if (![identities containsObject:identity]) { [identities addObject:identity];[paths addObject:relative]; }
+        } else if (error && !*error) *error=[NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+        close(fd);
+    }
+    return axs_cachekeeper_parent_paths(paths);
+}
 
 NSArray<NSString *> *axs_cachekeeper_scan_directories(NSURL *home, NSError **error) {
     if (error) *error=nil;

@@ -46,10 +46,13 @@ static inline BOOL axs_cachekeeper_data_marker(NSString *name) {
     return [n.pathExtension isEqual:@"log"] && stem.length &&
         [stem rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location==NSNotFound;
 }
+static inline NSArray<NSString *> *axs_cachekeeper_cache_roots(void) {
+    return @[@"Library/Caches", @"tmp", @"Library/Logs", @"Caches", @"Cache", @"cache", @".cache"];
+}
 // 扫描可展示所有一级数据目录；允许删除的根只来自这里，不能由目录名字含 cache 推断。
 static inline BOOL axs_cachekeeper_cache_path(NSString *path) {
     if (axs_cachekeeper_protected_path(path)) return NO;
-    for (NSString *root in @[@"Library/Caches", @"tmp", @"Library/Logs", @"Caches", @"Cache", @"cache", @".cache"]) {
+    for (NSString *root in axs_cachekeeper_cache_roots()) {
         if ([path isEqual:root] || [path hasPrefix:[root stringByAppendingString:@"/"]]) return YES;
     }
     return NO;
@@ -161,8 +164,31 @@ static inline BOOL axs_cachekeeper_url_cache_enabled(id state) {
 static inline BOOL axs_cachekeeper_should_prevent(id state) {
     return axs_cachekeeper_app_enabled(state) && axs_cachekeeper_wants_restriction(state) && axs_cachekeeper_url_cache_enabled(state);
 }
+static inline BOOL axs_cachekeeper_auto_discover(id state) {
+    return [state isKindOfClass:NSDictionary.class] && [state[@"autoDiscover"] isKindOfClass:NSNumber.class] && [state[@"autoDiscover"] boolValue];
+}
+static inline NSArray<NSString *> *axs_cachekeeper_exclusions(id state) {
+    return [state isKindOfClass:NSDictionary.class] ? axs_cachekeeper_cache_paths(state[@"excludedPaths"]) : @[];
+}
+static inline BOOL axs_cachekeeper_paths_overlap(NSString *left, NSString *right) {
+    return [left isEqual:right] || [left hasPrefix:[right stringByAppendingString:@"/"]] ||
+        [right hasPrefix:[left stringByAppendingString:@"/"]];
+}
+static inline NSArray<NSString *> *axs_cachekeeper_effective_paths(NSArray *selected, id state, NSArray *discovered) {
+    if (!axs_cachekeeper_app_enabled(state)) return @[];
+    NSMutableArray *paths=[axs_cachekeeper_cache_paths(selected) mutableCopy];
+    if (axs_cachekeeper_auto_discover(state) && [discovered isKindOfClass:NSArray.class]) {
+        for (id path in discovered) if ([axs_cachekeeper_cache_roots() containsObject:path]) [paths addObject:path];
+    }
+    // 不能通过加入父目录绕过子目录的手动排除。
+    for (NSString *path in [paths copy]) for (NSString *excluded in axs_cachekeeper_exclusions(state)) {
+        if (axs_cachekeeper_paths_overlap(path,excluded)) { [paths removeObject:path];break; }
+    }
+    return axs_cachekeeper_cache_paths(paths);
+}
 static inline NSMutableDictionary *axs_cachekeeper_app_state(id previous, BOOL enabled) {
-    return [@{@"enabled":@(enabled), @"mode":axs_cachekeeper_mode(previous), @"urlCache":@(axs_cachekeeper_url_cache_enabled(previous))} mutableCopy];
+    return [@{@"enabled":@(enabled), @"mode":axs_cachekeeper_mode(previous), @"urlCache":@(axs_cachekeeper_url_cache_enabled(previous)),
+        @"autoDiscover":@(axs_cachekeeper_auto_discover(previous)), @"excludedPaths":axs_cachekeeper_exclusions(previous)} mutableCopy];
 }
 static inline NSArray *axs_cachekeeper_activation_paths(id previous) {
     return previous==nil ? @[@"Library/Caches",@"tmp"] : axs_cachekeeper_cache_paths(previous);
@@ -171,7 +197,7 @@ static inline NSArray<NSString *> *axs_cachekeeper_selected_paths(NSDictionary *
     if (!axs_cachekeeper_bundle_id(bundle) || ![directories isKindOfClass:NSDictionary.class]) return @[];
     if (states && ![states isKindOfClass:NSDictionary.class]) return @[];
     if (!axs_cachekeeper_app_enabled(states[bundle])) return @[];
-    return axs_cachekeeper_cache_paths(directories[bundle]);
+    return axs_cachekeeper_effective_paths(directories[bundle],states[bundle],@[]);
 }
 static inline BOOL axs_cachekeeper_can_clean(NSDictionary *directories, NSDictionary *states, NSString *bundle) {
     return axs_cachekeeper_selected_paths(directories,states,bundle).count > 0 && axs_cachekeeper_wants_cleanup(states[bundle]);

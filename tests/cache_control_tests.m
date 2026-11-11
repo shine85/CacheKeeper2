@@ -116,8 +116,30 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_app_enabled(savedStates[bundle]) && [savedDirectories[bundle] isEqual:enableAll], @"一键开启同时打开本 APP 总开关与所选目录");
         require([savedStates[bundle][@"mode"] isEqual:@"clean"] && [savedStates[bundle][@"urlCache"] boolValue] &&
             [savedStates[@"com.tencent.xin"] isEqual:otherState], @"保留当前模式、网络选项和其他 APP 状态");
+        require(!axs_cachekeeper_one_click(preferences,bundle,detectedRows), @"一键配置自动管理");
+        savedStates=[NSDictionary dictionaryWithContentsOfFile:statesPath];
+        require([savedStates[bundle][@"mode"] isEqual:@"auto"] && axs_cachekeeper_should_prevent(savedStates[bundle]) &&
+            axs_cachekeeper_auto_discover(savedStates[bundle]), @"一键开启自动模式、网络限制和新增缓存发现");
+        require([savedStates[@"com.tencent.xin"] isEqual:otherState], @"一键预设不影响其他 APP");
+        require(axs_cachekeeper_manageable_rows(detectedRows).count==2 &&
+            axs_cachekeeper_readonly_rows(detectedRows).count==4, @"仅可操作目录在主列表，只读项可折叠");
+        NSDictionary *automaticState=savedStates[bundle];
+        NSArray *discovered=@[@"Library/Caches",@"tmp",@"Library/Logs",@"Library/Application Support",@"Group/group.example/Library/Caches"];
+        require([axs_cachekeeper_effective_paths(@[@"tmp"],automaticState,discovered) isEqual:@[@"Library/Caches",@"Library/Logs",@"tmp"]], @"自动发现只纳入标准缓存根并按父目录去重");
         require(!axs_cachekeeper_update_selection(preferences,bundle,@[@"Library/Caches"],NO), @"直接取消父目录");
         require([([NSDictionary dictionaryWithContentsOfFile:directoriesPath][bundle]) isEqual:@[@"tmp"]], @"取消不影响其他已选目录");
+        NSDictionary *afterExclusion=[NSDictionary dictionaryWithContentsOfFile:statesPath][bundle];
+        require(![axs_cachekeeper_effective_paths(@[@"tmp"],afterExclusion,discovered) containsObject:@"Library/Caches"], @"手动关闭的目录不会被自动发现重新开启");
+        require([axs_cachekeeper_app_state(afterExclusion,YES)[@"excludedPaths"] containsObject:@"Library/Caches"] &&
+            axs_cachekeeper_auto_discover(axs_cachekeeper_app_state(afterExclusion,YES)), @"切模式/总开关保留自动发现与排除选择");
+        require(!axs_cachekeeper_effective_paths(@[@"tmp"],axs_cachekeeper_app_state(afterExclusion,NO),discovered).count, @"总开关关闭时新增缓存不能被纳入处理");
+        NSError *discoveryError=nil;
+        NSArray *existingRoots=axs_cachekeeper_discover_cache_roots([NSURL fileURLWithPath:home],&discoveryError);
+        require(!discoveryError && [existingRoots containsObject:@"tmp"] && [existingRoots containsObject:@".cache"] &&
+            ![existingRoots containsObject:@"Library/Application Support"], @"真实文件系统发现仅扫描固定缓存根");
+        NSString *newRoot=[home stringByAppendingPathComponent:@"Cache"];
+        require([fm createDirectoryAtPath:newRoot withIntermediateDirectories:NO attributes:nil error:nil], @"新顶级缓存目录夹具");
+        require([axs_cachekeeper_discover_cache_roots([NSURL fileURLWithPath:home],&discoveryError) containsObject:@"Cache"], @"后续检测发现新增顶级标准缓存目录");
         require(!axs_cachekeeper_update_selection(preferences,@"single.app",@[@"Library/Caches/video"],YES), @"单项开启无需另开总开关");
         require(axs_cachekeeper_app_enabled([NSDictionary dictionaryWithContentsOfFile:statesPath][@"single.app"]), @"单项开启仅激活对应 APP");
         NSData *beforeInvalid=[NSData dataWithContentsOfFile:directoriesPath];
