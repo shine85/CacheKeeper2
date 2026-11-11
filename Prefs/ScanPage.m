@@ -32,13 +32,8 @@
 }
 - (void)axs_cachekeeper_reload {
     self.displayCache=nil;
-    NSMutableArray *rows=[self.rows mutableCopy] ?: [NSMutableArray new];
     NSDictionary *report=[self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]];
-    NSMutableSet *known=[NSMutableSet new];
-    for (NSDictionary *row in rows) if (row[@"path"]) [known addObject:row[@"path"]];
-    for (NSString *path in axs_cachekeeper_cache_paths(report[@"effectivePaths"])) {
-        if (![known containsObject:path]) [rows addObject:@{@"path":path,@"manageable":@YES,@"automatic":@YES}];
-    }
+    NSArray *rows=axs_cachekeeper_display_rows(self.rows,report[@"discoveredPaths"]);
     self.cacheRows=axs_cachekeeper_manageable_rows(rows);
     self.otherRows=axs_cachekeeper_readonly_rows(rows);
     self.enableAllButton.enabled=!self.timer && self.cacheRows.count>0;

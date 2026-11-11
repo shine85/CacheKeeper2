@@ -21,6 +21,15 @@ static inline NSArray<NSString *> *axs_cachekeeper_enableable_paths(NSArray *row
     for (NSDictionary *row in axs_cachekeeper_manageable_rows(rows)) [paths addObject:row[@"path"]];
     return axs_cachekeeper_cache_paths(paths);
 }
+static inline NSArray<NSDictionary *> *axs_cachekeeper_display_rows(NSArray *rows, NSArray *discovered) {
+    NSMutableArray *result=[axs_cachekeeper_parent_rows(rows) mutableCopy];
+    NSMutableSet *known=[NSMutableSet new];
+    for (NSDictionary *row in result) [known addObject:row[@"path"]];
+    for (NSString *path in axs_cachekeeper_cache_paths(discovered)) {
+        if (![known containsObject:path]) [result addObject:@{@"path":path,@"manageable":@YES,@"automatic":@YES}];
+    }
+    return axs_cachekeeper_parent_rows(result);
+}
 
 // 只更新当前 APP；自动发现的实时结果由引擎计算，不回写用户选择。
 static inline NSString *axs_cachekeeper_save_selection(NSString *folder, NSString *bundle, NSArray *changes, BOOL enable, BOOL oneClick) {

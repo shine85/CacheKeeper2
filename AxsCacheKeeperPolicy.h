@@ -200,7 +200,9 @@ static inline NSArray<NSString *> *axs_cachekeeper_selected_paths(NSDictionary *
     return axs_cachekeeper_effective_paths(directories[bundle],states[bundle],@[]);
 }
 static inline BOOL axs_cachekeeper_can_clean(NSDictionary *directories, NSDictionary *states, NSString *bundle) {
-    return axs_cachekeeper_selected_paths(directories,states,bundle).count > 0 && axs_cachekeeper_wants_cleanup(states[bundle]);
+    return axs_cachekeeper_bundle_id(bundle) && [states isKindOfClass:NSDictionary.class] &&
+        axs_cachekeeper_app_enabled(states[bundle]) && axs_cachekeeper_wants_cleanup(states[bundle]) &&
+        (axs_cachekeeper_selected_paths(directories,states,bundle).count > 0 || axs_cachekeeper_auto_discover(states[bundle]));
 }
 static inline NSString *axs_cachekeeper_summary(NSDictionary *scan, NSDictionary *report) {
     NSMutableArray *parts = [NSMutableArray new];

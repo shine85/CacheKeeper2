@@ -130,6 +130,12 @@ int main(int argc, const char *argv[]) {
         require([([NSDictionary dictionaryWithContentsOfFile:directoriesPath][bundle]) isEqual:@[@"tmp"]], @"取消不影响其他已选目录");
         NSDictionary *afterExclusion=[NSDictionary dictionaryWithContentsOfFile:statesPath][bundle];
         require(![axs_cachekeeper_effective_paths(@[@"tmp"],afterExclusion,discovered) containsObject:@"Library/Caches"], @"手动关闭的目录不会被自动发现重新开启");
+        NSArray *knownRows=axs_cachekeeper_display_rows(@[@{@"path":@"tmp",@"bytes":@1}],@[@"Library/Caches",@"tmp"]);
+        require(knownRows.count==2 && axs_cachekeeper_manageable_rows(knownRows).count==2, @"已发现但手动排除的目录仍可显示并重新开启");
+        require(axs_cachekeeper_can_clean(@{},@{bundle:automaticState},bundle) &&
+            !axs_cachekeeper_can_clean(@{},@{bundle:axs_cachekeeper_app_state(automaticState,NO)},bundle), @"自动发现为唯一来源时允许快捷请求，关闭总开关仍拒绝");
+        NSDictionary *excludeChild=@{@"enabled":@YES,@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Caches/video"]};
+        require(![axs_cachekeeper_effective_paths(@[@"Library/Caches"],excludeChild,@[@"Library/Caches"]) count], @"自动发现父目录不能绕过对子目录的手动排除");
         require([axs_cachekeeper_app_state(afterExclusion,YES)[@"excludedPaths"] containsObject:@"Library/Caches"] &&
             axs_cachekeeper_auto_discover(axs_cachekeeper_app_state(afterExclusion,YES)), @"切模式/总开关保留自动发现与排除选择");
         require(!axs_cachekeeper_effective_paths(@[@"tmp"],axs_cachekeeper_app_state(afterExclusion,NO),discovered).count, @"总开关关闭时新增缓存不能被纳入处理");
