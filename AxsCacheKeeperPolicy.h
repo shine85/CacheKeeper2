@@ -35,6 +35,17 @@ static inline BOOL axs_cachekeeper_protected_path(NSString *path) {
     }
     return NO;
 }
+static inline BOOL axs_cachekeeper_data_marker(NSString *name) {
+    NSString *n=name.lowercaseString;
+    if ([n hasSuffix:@".db"] || [n containsString:@".db-"] || [n containsString:@"sqlite"] ||
+        [n hasSuffix:@".realm"] || [n hasSuffix:@".ldb"] || [n hasSuffix:@".sst"] ||
+        [n isEqual:@"current"] || [n hasPrefix:@"manifest-"]) return YES;
+    for (NSString *word in @[@"cookie",@"keychain",@"credential",@"login",@"account",@"auth",@"session",@"token"])
+        if ([n containsString:word]) return YES;
+    NSString *stem=n.stringByDeletingPathExtension;
+    return [n.pathExtension isEqual:@"log"] && stem.length &&
+        [stem rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location==NSNotFound;
+}
 // 扫描可展示所有一级数据目录；允许删除的根只来自这里，不能由目录名字含 cache 推断。
 static inline BOOL axs_cachekeeper_cache_path(NSString *path) {
     if (axs_cachekeeper_protected_path(path)) return NO;
@@ -44,6 +55,7 @@ static inline BOOL axs_cachekeeper_cache_path(NSString *path) {
     return NO;
 }
 static inline NSString *axs_cachekeeper_directory_description(NSString *path) {
+    if ([path hasPrefix:@"Group/"]) return @"App Group 共享数据：可能被其他 APP 或扩展使用；仅统计，不锁不删";
     NSDictionary *descriptions=@{
         @"tmp":@"临时工作文件、导入导出与下载中转；仅识别出的媒体缓存可清理",
         @"Library/Caches":@"可重建缓存；普通媒体可清理，数据库与未知内容保留",
@@ -140,8 +152,20 @@ static inline NSString *axs_cachekeeper_mode(id state) {
 }
 static inline BOOL axs_cachekeeper_wants_restriction(id state) { return ![axs_cachekeeper_mode(state) isEqual:@"clean"]; }
 static inline BOOL axs_cachekeeper_wants_cleanup(id state) { return ![axs_cachekeeper_mode(state) isEqual:@"prevent"]; }
+static inline BOOL axs_cachekeeper_url_cache_enabled(id state) {
+    if ([state isKindOfClass:NSDictionary.class] && state[@"urlCache"] != nil)
+        return [state[@"urlCache"] isKindOfClass:NSNumber.class] && [state[@"urlCache"] boolValue];
+    // 兼容既有显式开启的记录；全新 APP 仍默认关闭网络选项。
+    return axs_cachekeeper_app_enabled(state) && axs_cachekeeper_wants_restriction(state);
+}
+static inline BOOL axs_cachekeeper_should_prevent(id state) {
+    return axs_cachekeeper_app_enabled(state) && axs_cachekeeper_wants_restriction(state) && axs_cachekeeper_url_cache_enabled(state);
+}
 static inline NSMutableDictionary *axs_cachekeeper_app_state(id previous, BOOL enabled) {
-    return [@{@"enabled":@(enabled), @"mode":axs_cachekeeper_mode(previous)} mutableCopy];
+    return [@{@"enabled":@(enabled), @"mode":axs_cachekeeper_mode(previous), @"urlCache":@(axs_cachekeeper_url_cache_enabled(previous))} mutableCopy];
+}
+static inline NSArray *axs_cachekeeper_activation_paths(id previous) {
+    return previous==nil ? @[@"Library/Caches",@"tmp"] : axs_cachekeeper_cache_paths(previous);
 }
 static inline NSArray<NSString *> *axs_cachekeeper_selected_paths(NSDictionary *directories, NSDictionary *states, NSString *bundle) {
     if (!axs_cachekeeper_bundle_id(bundle) || ![directories isKindOfClass:NSDictionary.class]) return @[];

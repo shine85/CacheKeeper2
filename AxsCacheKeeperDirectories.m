@@ -38,3 +38,40 @@ NSArray<NSString *> *axs_cachekeeper_scan_directories(NSURL *home, NSError **err
     }
     return axs_cachekeeper_parent_paths(paths);
 }
+
+NSDictionary<NSString *,NSURL *> *axs_cachekeeper_valid_group_homes(NSDictionary *groups) {
+    if (![groups isKindOfClass:NSDictionary.class]) return @{};
+    NSMutableDictionary *result=[NSMutableDictionary new];
+    for (NSString *identifier in groups) {
+        if (!axs_cachekeeper_bundle_id(identifier)) continue;
+        NSURL *url=groups[identifier];
+        if (![url isKindOfClass:NSURL.class] || !url.isFileURL) continue;
+        url=url.URLByResolvingSymlinksInPath;
+        if (![[NSUUID alloc] initWithUUIDString:url.lastPathComponent] ||
+            ![url.URLByDeletingLastPathComponent.path hasSuffix:@"/Containers/Shared/AppGroup"]) continue;
+        result[identifier]=url;
+    }
+    return result;
+}
+
+NSArray<NSDictionary *> *axs_cachekeeper_scan_targets(NSURL *home, NSDictionary *groups, NSError **error) {
+    if (error) *error=nil;
+    NSMutableArray *targets=[NSMutableArray new];
+    NSError *scanError=nil;
+    if (home) for (NSString *path in axs_cachekeeper_scan_directories(home,&scanError))
+        [targets addObject:@{@"path":path,@"root":[home URLByAppendingPathComponent:path],@"readOnly":@(!axs_cachekeeper_cache_path(path))}];
+    if (scanError && error) *error=scanError;
+    NSDictionary *valid=axs_cachekeeper_valid_group_homes(groups);
+    NSMutableSet *visited=[NSMutableSet new];
+    for (NSString *identifier in [valid.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        NSURL *group=valid[identifier];
+        if ([visited containsObject:group.path]) continue;
+        [visited addObject:group.path];
+        scanError=nil;
+        for (NSString *path in axs_cachekeeper_scan_directories(group,&scanError))
+            [targets addObject:@{@"path":[NSString stringWithFormat:@"Group/%@/%@",identifier,path],
+                @"root":[group URLByAppendingPathComponent:path],@"readOnly":@YES}];
+        if (scanError && error && !*error) *error=scanError;
+    }
+    return targets;
+}

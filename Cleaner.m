@@ -13,14 +13,11 @@ static NSString *axs_cachekeeper_previous_message;
 static void axs_cachekeeper_refresh_network(void) {
     NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
     NSString *folder = jbroot(@"/var/mobile/Library/CacheKeeper");
-    NSString *selectionPath = [folder stringByAppendingPathComponent:@"directories.plist"];
     NSString *statePath = [folder stringByAppendingPathComponent:@"appEnabled.plist"];
-    NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:selectionPath];
     NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:statePath];
-    BOOL readable = axs_cachekeeper_access && selection &&
+    BOOL readable = axs_cachekeeper_access &&
         (states || ![NSFileManager.defaultManager fileExistsAtPath:statePath]);
-    BOOL selected = readable && axs_cachekeeper_selected_paths(selection, states, bundle).count > 0;
-    BOOL prevent = selected && axs_cachekeeper_wants_restriction(states[bundle]);
+    BOOL prevent = readable && axs_cachekeeper_should_prevent(states[bundle]);
     if (!prevent && !axs_cachekeeper_previous_prevent && !axs_cachekeeper_restore_pending) return;
     BOOL applied = axs_cachekeeper_configure_network_cache(prevent);
     axs_cachekeeper_restore_pending = !prevent && !applied;

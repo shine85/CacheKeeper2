@@ -21,6 +21,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 @property(nonatomic,strong) NSTimer *batchTimer;
 @property(nonatomic,strong) NSDictionary *scanHistory;
 @property(nonatomic,copy) NSString *appsError;
+@property(nonatomic,strong) NSDictionary *directoriesSnapshot;
+@property(nonatomic,strong) NSDictionary *statesSnapshot;
 @end
 @implementation CKSettings
 - (void)viewDidLoad {
@@ -55,11 +57,11 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     NSDictionary *scan=self.scanHistory[app[@"id"]];
     cell.detailTextLabel.text=axs_cachekeeper_summary(scan,status);
     UISwitch *toggle = [UISwitch new]; toggle.accessibilityIdentifier = app[@"id"];
-    NSDictionary *directories=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
-    NSDictionary *states=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")];
+    NSDictionary *directories=self.directoriesSnapshot;
+    NSDictionary *states=self.statesSnapshot;
     toggle.on=axs_cachekeeper_app_enabled(states[app[@"id"]]);
     if (!toggle.on) cell.detailTextLabel.text=[@"未开启缓存控制\n" stringByAppendingString:axs_cachekeeper_summary(scan,nil)];
-    else if (!axs_cachekeeper_selected_paths(directories,states,app[@"id"]).count) cell.detailTextLabel.text=@"已开启总开关，但未选择可处理目录；请进入设置";
+    else if (!axs_cachekeeper_selected_paths(directories,states,app[@"id"]).count) cell.detailTextLabel.text=@"总开关已开启；没有文件清理目录，网络缓存按独立选项执行";
     [toggle addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle; cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
@@ -108,6 +110,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController { [self updateBatch]; }
 - (void)updateBatch {
     NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist")];
+    self.statesSnapshot=states;
+    self.directoriesSnapshot=[NSDictionary dictionaryWithContentsOfFile:jbroot(@"/var/mobile/Library/CacheKeeper/directories.plist")];
     NSString *query = self.navigationItem.searchController.searchBar.text;
     NSMutableDictionary *sortKeys = [NSMutableDictionary new];
     NSMutableSet *enabled = [NSMutableSet new];
@@ -148,17 +152,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     NSMutableDictionary *directories=axs_cachekeeper_edit_configuration(directoryPath);
     NSMutableDictionary *states=axs_cachekeeper_edit_configuration(jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist"));
     if (!directories || !states) { [self axs_cachekeeper_configuration_error]; [self updateBatch]; return; }
-    if (toggle.on && !axs_cachekeeper_cache_paths(directories[bundle]).count) {
-        NSMutableArray *defaults=[NSMutableArray new];
-        for (NSDictionary *row in self.scanHistory[bundle][@"rows"]) if ([row[@"path"] isEqual:@"Library/Caches"] || [row[@"path"] isEqual:@"tmp"]) [defaults addObject:row[@"path"]];
-        if (!defaults.count) {
-            toggle.on=NO;
-            CKScanPage *page=[CKScanPage new];page.bundle=bundle;
-            for (NSDictionary *app in self.apps) if ([app[@"id"] isEqual:bundle]) page.appName=app[@"name"];
-            [self.navigationController pushViewController:page animated:YES];return;
-        }
-        directories[bundle]=defaults;
-    }
+    if (toggle.on && !directories[bundle]) directories[bundle]=axs_cachekeeper_activation_paths(nil);
     states[bundle]=axs_cachekeeper_app_state(states[bundle],toggle.on);
     if (![directories writeToFile:directoryPath atomically:YES] ||
         ![states writeToFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist") atomically:YES]) {

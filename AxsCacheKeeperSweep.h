@@ -8,6 +8,9 @@
 @property(nonatomic, readonly) NSUInteger failed;
 @property(nonatomic, readonly) NSUInteger protectedCount;
 @property(nonatomic, readonly) NSUInteger recentCount;
+@property(nonatomic, readonly) BOOL checking;
+@property(nonatomic, readonly) NSUInteger inspected;
+@property(nonatomic, readonly) NSUInteger changedCount;
 @property(nonatomic, readonly) unsigned long long bytes;
 @property(nonatomic, readonly, copy) NSString *error;
 - (instancetype)initWithRoot:(NSString *)root;
