@@ -59,6 +59,7 @@ static id Read(id object, NSString *name) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSTimer *timer = [NSTimer timerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer) {
             CKScanRequests();
+            CKInspectRequests();
             CKApplyDirectorySwitches();
         }];
         [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];

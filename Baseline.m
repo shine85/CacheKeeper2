@@ -17,7 +17,7 @@
 @property(nonatomic, readwrite) NSUInteger recentCount;
 @property(nonatomic, readwrite) unsigned long long bytes;
 @property(nonatomic, readwrite, copy) NSString *error;
-@property(nonatomic, copy) NSString *root;
+@property(nonatomic, readwrite, copy) NSString *root;
 @property(nonatomic) dev_t device;
 @property(nonatomic) ino_t inode;
 @property(nonatomic, strong) NSDirectoryEnumerator *entries;

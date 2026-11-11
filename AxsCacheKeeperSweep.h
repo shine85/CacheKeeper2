@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 
 @interface AxsCacheKeeperSweep : NSObject
+@property(nonatomic, readonly, copy) NSString *root;
 @property(nonatomic, readonly) BOOL complete;
 @property(nonatomic, readonly) BOOL cancelled;
 @property(nonatomic, readonly) NSUInteger removed;

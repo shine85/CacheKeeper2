@@ -54,8 +54,8 @@ NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *file) {
     }
     return @{@"failed":@(failed), @"applied":@(applied), @"error":message};
 }
-void CKPermissions(NSURL *home, BOOL enabled) {
-    if (enabled) { NSLog(@"[CacheKeeper] 不再支持目录 chmod 限写"); return; }
+NSDictionary *CKPermissions(NSURL *home, BOOL enabled) {
+    if (enabled) return @{@"failed":@1,@"error":@"不再支持目录 chmod 限写"};
     NSString *journal = jbroot(@"/var/mobile/Library/CacheKeeper/permissions.plist");
     NSArray *paths = nil;
     if (home) {
@@ -66,4 +66,5 @@ void CKPermissions(NSURL *home, BOOL enabled) {
     }
     NSDictionary *result = axs_cachekeeper_restore_paths(paths, journal);
     if ([result[@"failed"] unsignedIntegerValue]) NSLog(@"[CacheKeeper] %@", result[@"error"]);
+    return result;
 }

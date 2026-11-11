@@ -47,7 +47,7 @@ static inline BOOL axs_cachekeeper_data_marker(NSString *name) {
         [stem rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location==NSNotFound;
 }
 static inline NSArray<NSString *> *axs_cachekeeper_cache_roots(void) {
-    return @[@"Library/Caches", @"tmp", @"Library/Logs", @"Caches", @"Cache", @"cache", @".cache"];
+    return @[@"Library/Caches", @"tmp", @"Caches", @"Cache", @"cache", @".cache"];
 }
 // 扫描可展示所有一级数据目录；允许删除的根只来自这里，不能由目录名字含 cache 推断。
 static inline BOOL axs_cachekeeper_cache_path(NSString *path) {
@@ -77,7 +77,7 @@ static inline NSString *axs_cachekeeper_directory_kind(NSString *path) {
     if ([path hasPrefix:@"Group/"]) return @"shared";
     if (axs_cachekeeper_cache_path(path)) return @"cache";
     NSString *inner=axs_cachekeeper_inner_path(path);
-    for (NSString *root in @[@"Library/Application Support",@"Library/HTTPStorages",@"Library/SplashBoard",@"Library/Saved Application State"]) {
+    for (NSString *root in @[@"Library/Application Support",@"Library/HTTPStorages",@"Library/SplashBoard",@"Library/Saved Application State",@"Library/Logs"]) {
         if ([inner isEqual:root] || [inner hasPrefix:[root stringByAppendingString:@"/"]]) return @"mixed";
     }
     return @"unknown";
@@ -87,14 +87,14 @@ static inline NSString *axs_cachekeeper_directory_description(NSString *path) {
     NSDictionary *descriptions=@{
         @"tmp":@"临时工作文件、导入导出与下载中转；仅识别出的媒体缓存可清理",
         @"Library/Caches":@"可重建缓存；普通媒体可清理，数据库与未知内容保留",
-        @"Library/Logs":@"日志与诊断；日志、数据库 WAL 和未知内容保留",
+        @"Library/Logs":@"平台约定：日志与诊断，也可能含数据库 WAL；当前不提供清理开关，可深度检测",
         @"Library/Application Support":@"混合用途：业务数据、数据库、离线资源或缓存；未逐项验证可删性",
         @"Library/HTTPStorages":@"混合用途：网络持久化数据与会话状态；未验证可删性",
         @"Library/WebKit":@"网页缓存、网站数据库与登录态；仅查看",
         @"Library/Cookies":@"Cookie 与登录会话；仅查看",
         @"Library/Preferences":@"APP 设置与偏好；仅查看",
-        @"Library/SplashBoard":@"启动与切换画面快照；仅查看",
-        @"Library/Saved Application State":@"界面恢复与运行状态；仅查看",
+        @"Library/SplashBoard":@"平台约定：可再生的启动与切换画面快照；未实测可删性",
+        @"Library/Saved Application State":@"平台约定：界面恢复状态；未实测可删性",
         @"Documents":@"用户文稿、聊天附件和离线文件；仅查看",
         @"Downloads":@"用户下载与离线文件；仅查看",
         @"Inbox":@"导入或共享接收的用户文件；仅查看"
@@ -247,6 +247,7 @@ extern "C" {
 NSDictionary *axs_cachekeeper_restore_paths(NSArray *paths, NSString *journal);
 void axs_cachekeeper_request_cleanup(NSString *bundle);
 void CKScanRequests(void);
+void CKInspectRequests(void);
 void CKApplyDirectorySwitches(void);
 #ifdef __cplusplus
 }

@@ -7,6 +7,8 @@
 #import "AxsCacheKeeperPolicy.h"
 #import "AxsCacheKeeperSweep.h"
 #import "AxsCacheKeeperDirectories.h"
+#import "AxsCacheKeeperProcess.h"
+#import "AxsCacheKeeperInspection.h"
 static id SRead(id target,NSString *name) { SEL s=NSSelectorFromString(name);return [target respondsToSelector:s]?((id(*)(id,SEL))objc_msgSend)(target,s):nil; }
 static NSURL *Container(NSString *bundle) {
     Class proxy=NSClassFromString(@"LSApplicationProxy"); SEL s=NSSelectorFromString(@"applicationProxyForIdentifier:");
@@ -34,7 +36,7 @@ void CKScanRequests(void) {
         batchItem=YES;
     }
     NSString *bundle=request[@"bundle"],*token=request[@"token"];
-    if (![bundle isKindOfClass:NSString.class] || ![token isKindOfClass:NSString.class] || !token.length) return;
+    if (!axs_cachekeeper_bundle_id(bundle) || ![token isKindOfClass:NSString.class] || !token.length) return;
     NSURL *home=Container(bundle);
     Class proxy=NSClassFromString(@"LSApplicationProxy");
     SEL lookup=NSSelectorFromString(@"applicationProxyForIdentifier:");
@@ -71,11 +73,15 @@ void CKScanRequests(void) {
         NSDictionary *old=history[bundle];
         NSMutableDictionary *groupPaths=[NSMutableDictionary new];
         for (NSString *identifier in groups) groupPaths[identifier]=[groups[identifier] path];
-        NSDictionary *result=@{@"token":token,@"bundle":bundle,@"home":home.path?:@"",@"groups":groupPaths,@"rows":rows,@"updated":NSDate.date,@"previousRows":old[@"rows"]?:@[],
-            @"error":home ? (directoryError.localizedDescription ?: @"") : @"此 APP 没有可读取的标准数据容器"};
+        NSMutableDictionary *result=[@{@"token":token,@"bundle":bundle,@"home":home.path?:@"",@"groups":groupPaths,@"rows":rows,@"updated":NSDate.date,@"previousRows":old[@"rows"]?:@[],@"recentScans":axs_cachekeeper_recent_scans(old),
+            @"error":home ? (directoryError.localizedDescription ?: @"") : @"此 APP 没有可读取的标准数据容器"} mutableCopy];
         history[bundle]=result;
-        [history writeToFile:[folder stringByAppendingPathComponent:@"snapshots.plist"] atomically:YES];
-        if (!batchItem) [result writeToFile:[folder stringByAppendingPathComponent:@"scan.plist"] atomically:YES];
+        NSError *saveError=nil;
+        if (![history writeToURL:[NSURL fileURLWithPath:[folder stringByAppendingPathComponent:@"snapshots.plist"]] error:&saveError]) {
+            result[@"error"]=[NSString stringWithFormat:@"%@\n检测结果未能持久保存：%@（%@/%ld）。检查配置目录可写性后重试。",result[@"error"],saveError.localizedDescription,saveError.domain,(long)saveError.code];
+            NSLog(@"[CacheKeeper] %@",result[@"error"]);
+        }
+        if (!batchItem && ![result writeToURL:[NSURL fileURLWithPath:[folder stringByAppendingPathComponent:@"scan.plist"]] error:&saveError]) NSLog(@"[CacheKeeper] 检测回执写入失败：%@",saveError);
         dispatch_async(dispatch_get_main_queue(),^{
             if (batchItem) {
                 NSMutableDictionary *current=[[NSDictionary dictionaryWithContentsOfFile:batchPath] mutableCopy];
@@ -91,22 +97,57 @@ void CKScanRequests(void) {
         });
     });
 }
-typedef NS_ENUM(NSInteger, AxsCacheKeeperProcessState) {
-    AxsCacheKeeperProcessUnknown, AxsCacheKeeperProcessRunning, AxsCacheKeeperProcessStopped
-};
+void CKInspectRequests(void) {
+    static BOOL busy;static NSString *lastToken;
+    if (busy) return;
+    NSString *folder=jbroot(@"/var/mobile/Library/CacheKeeper");
+    NSString *file=[folder stringByAppendingPathComponent:@"inspectionRequest.plist"];
+    NSDictionary *request=[NSDictionary dictionaryWithContentsOfFile:file];
+    NSString *bundle=request[@"bundle"],*relative=request[@"path"],*token=request[@"token"];
+    if (!axs_cachekeeper_bundle_id(bundle) || !axs_cachekeeper_relative_path(relative) ||
+        ![token isKindOfClass:NSString.class] || !token.length || [token isEqual:lastToken]) return;
+    // 每次由系统重新解析容器，不信任面板传入绝对路径或旧快照路径。
+    NSURL *home=Container(bundle);
+    id proxyClass=NSClassFromString(@"LSApplicationProxy");SEL lookup=NSSelectorFromString(@"applicationProxyForIdentifier:");
+    id app=[proxyClass respondsToSelector:lookup] ? ((id(*)(id,SEL,id))objc_msgSend)(proxyClass,lookup,bundle) : nil;
+    NSDictionary *groups=axs_cachekeeper_valid_group_homes(SRead(app,@"groupContainerURLs"));
+    busy=YES;lastToken=[token copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        NSString *output=[folder stringByAppendingPathComponent:[NSString stringWithFormat:@"Status/%@.inspection.plist",bundle]];
+        NSMutableDictionary *saved=[[[NSDictionary dictionaryWithContentsOfFile:output] objectForKey:@"reports"] mutableCopy] ?: [NSMutableDictionary new];
+        NSError *error=nil;NSURL *root=nil;
+        for (NSDictionary *target in ([request[@"cancel"] boolValue] ? @[] : axs_cachekeeper_scan_targets(home,groups,&error)))
+            if ([target[@"path"] isEqual:relative]) { root=target[@"root"];break; }
+        AxsCacheKeeperInspection *inspection=root ? [[AxsCacheKeeperInspection alloc] initWithRoot:root.path] : nil;
+        NSTimeInterval written=0;
+        while (YES) {
+            @autoreleasepool {
+                NSDictionary *current=[NSDictionary dictionaryWithContentsOfFile:file];
+                BOOL cancelled=![current[@"token"] isEqual:token] || [current[@"cancel"] boolValue];
+                if (!cancelled) [inspection advance:256];
+                BOOL done=!inspection || inspection.complete || cancelled;
+                NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+                if (done || now-written>=1) {
+                    NSMutableDictionary *report=inspection ? [[inspection report] mutableCopy] : [@{@"complete":@(!cancelled),@"coverageComplete":@NO,@"error":cancelled ? @"" : (error.localizedDescription ?: @"目录已消失、被保护或不属于此 APP 的可见父目录")} mutableCopy];
+                    report[@"token"]=token;report[@"bundle"]=bundle;report[@"path"]=relative;report[@"cancelled"]=@(cancelled);report[@"updated"]=NSDate.date;
+                    saved[relative]=report;
+                    if (![@{@"reports":saved} writeToURL:[NSURL fileURLWithPath:output] error:&error]) { NSLog(@"[CacheKeeper] 深度档案写入失败：%@",error);break; }
+                    written=now;
+                }
+                if (done) break;
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(),^{busy=NO;});
+    });
+}
 static NSMutableSet<NSString *> *axs_cachekeeper_manual;
-static AxsCacheKeeperProcessState axs_cachekeeper_process(NSString *bundle) {
-    id manager = SRead(NSClassFromString(@"SBApplicationController"), @"sharedInstance");
-    SEL lookup = NSSelectorFromString(@"applicationWithBundleIdentifier:");
-    id app = [manager respondsToSelector:lookup] ? ((id(*)(id,SEL,id))objc_msgSend)(manager,lookup,bundle) : nil;
-    id state = SRead(app,@"processState") ?: SRead(app,@"_internalProcessState");
-    SEL running = NSSelectorFromString(@"isRunning");
-    if (![state respondsToSelector:running]) return AxsCacheKeeperProcessUnknown;
-    return ((BOOL(*)(id,SEL))objc_msgSend)(state,running) ? AxsCacheKeeperProcessRunning : AxsCacheKeeperProcessStopped;
+static AxsCacheKeeperProcessState axs_cachekeeper_process(NSString *bundle, NSString **reason) {
+    id manager = SRead(NSClassFromString(@"FBProcessManager"), @"sharedInstance");
+    return axs_cachekeeper_process_state(manager,bundle,reason);
 }
 static NSString *axs_cachekeeper_folder(void) { return jbroot(@"/var/mobile/Library/CacheKeeper"); }
 static void axs_cachekeeper_report(NSString *bundle, NSString *phase, NSString *message,
-                                  NSUInteger removed, unsigned long long bytes, NSUInteger failed, NSArray *effectivePaths, NSArray *discoveredPaths) {
+                                  NSUInteger removed, unsigned long long bytes, NSUInteger failed, NSArray *effectivePaths, NSArray *discoveredPaths, NSDictionary *directories) {
     // 主线程快捷操作与清理队列共享同一个原子读改写区，避免累计量丢失。
     @synchronized (AxsCacheKeeperSweep.class) {
         NSString *path = [[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"]
@@ -115,11 +156,11 @@ static void axs_cachekeeper_report(NSString *bundle, NSString *phase, NSString *
         NSArray *known=discoveredPaths ?: (previous[@"discoveredPaths"] ?: @[]);
         if (!removed && !bytes && [previous[@"phase"] isEqual:phase] && [previous[@"message"] isEqual:message] &&
             [previous[@"failed"] unsignedIntegerValue] == failed && [previous[@"effectivePaths"] isEqual:effectivePaths] &&
-            [previous[@"discoveredPaths"] isEqual:known]) return;
+            [previous[@"discoveredPaths"] isEqual:known] && !directories && -[previous[@"updated"] timeIntervalSinceNow]<30) return;
         NSDictionary *report = @{@"updated":NSDate.date, @"phase":phase, @"message":message,
             @"removed":@([previous[@"removed"] unsignedIntegerValue]+removed),
             @"bytes":@([previous[@"bytes"] unsignedLongLongValue]+bytes), @"failed":@(failed),
-            @"effectivePaths":effectivePaths ?: @[], @"discoveredPaths":known};
+            @"effectivePaths":effectivePaths ?: @[], @"discoveredPaths":known, @"directories":directories ?: previous[@"directories"] ?: @{}};
         if (![report writeToFile:path atomically:YES]) NSLog(@"[CacheKeeper] 无法保存 %@ 清理状态", bundle);
     }
 }
@@ -137,12 +178,13 @@ void axs_cachekeeper_request_cleanup(NSString *bundle) {
     NSDictionary *states = [NSDictionary dictionaryWithContentsOfFile:[axs_cachekeeper_folder() stringByAppendingPathComponent:@"appEnabled.plist"]];
     if (!axs_cachekeeper_app_enabled(states[bundle])) return;
     if ([axs_cachekeeper_mode(states[bundle]) isEqual:@"prevent"]) {
-        axs_cachekeeper_report(bundle, @"prevent", @"当前为只禁止模式，不删除缓存文件", 0, 0, 0, @[], nil); return;
+        axs_cachekeeper_report(bundle, @"prevent", @"当前为只禁止模式，不删除缓存文件", 0, 0, 0, @[], nil, nil); return;
     }
     if (!axs_cachekeeper_can_clean(selection,states,bundle)) return;
     if (!axs_cachekeeper_manual) axs_cachekeeper_manual = [NSMutableSet new];
-    if (axs_cachekeeper_process(bundle) != AxsCacheKeeperProcessStopped) {
-        axs_cachekeeper_report(bundle, @"waiting", @"请先完全退出 APP；状态未知时不清理", 0, 0, 0, @[], nil); return;
+    NSString *reason=nil;
+    if (axs_cachekeeper_process(bundle,&reason) != AxsCacheKeeperProcessStopped) {
+        axs_cachekeeper_report(bundle, @"waiting", reason, 0, 0, 0, @[], nil, nil); return;
     }
     [axs_cachekeeper_manual addObject:bundle];
 }
@@ -178,8 +220,10 @@ void CKApplyDirectorySwitches(void) {
         NSURL *home = Container(bundle);
         NSMutableArray *roots = [NSMutableArray new];
         if (home) for (NSString *relative in paths) [roots addObject:[home.path stringByAppendingPathComponent:relative]];
+        NSString *reason=nil;
+        AxsCacheKeeperProcessState process=axs_cachekeeper_process(bundle,&reason);
         targets[bundle] = @{@"roots":roots, @"paths":paths, @"home":home.path ?: @"", @"mode":mode,
-            @"manual":@(manual), @"process":@(axs_cachekeeper_process(bundle))};
+            @"manual":@(manual), @"process":@(process), @"processReason":reason ?: @""};
     }
     busy = YES;
     dispatch_async(queue, ^{
@@ -193,22 +237,22 @@ void CKApplyDirectorySwitches(void) {
             BOOL manual = [target[@"manual"] boolValue];
             NSString *mode = target[@"mode"];
             if ([restored[@"failed"] unsignedIntegerValue]) {
-                axs_cachekeeper_report(bundle, @"error", restored[@"error"], 0, 0, [restored[@"failed"] unsignedIntegerValue], paths, nil);
+                axs_cachekeeper_report(bundle, @"error", restored[@"error"], 0, 0, [restored[@"failed"] unsignedIntegerValue], paths, nil, nil);
                 continue;
             }
             if ([mode isEqual:@"prevent"]) {
                 [jobs removeObjectForKey:bundle]; [finished removeObjectForKey:bundle];
                 NSString *network=axs_cachekeeper_url_cache_enabled(states[bundle]) ? axs_cachekeeper_network_status(bundle) : @"网络缓存开关已关闭，当前不执行缓存干预";
-                axs_cachekeeper_report(bundle, @"prevent", [@"只禁止模式，不清理文件。\n" stringByAppendingString:network], 0, 0, 0, paths, nil);
+                axs_cachekeeper_report(bundle, @"prevent", [@"只禁止模式，不清理文件。\n" stringByAppendingString:network], 0, 0, 0, paths, nil, nil);
                 if (manual) dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
                 continue;
             }
-            if (![target[@"home"] length]) { axs_cachekeeper_report(bundle, @"error", @"无法解析 APP 数据容器", 0, 0, 1, paths, nil); continue; }
+            if (![target[@"home"] length]) { axs_cachekeeper_report(bundle, @"error", @"无法解析 APP 数据容器", 0, 0, 1, paths, nil, nil); continue; }
             if ([target[@"process"] integerValue] != AxsCacheKeeperProcessStopped) {
                 [jobs removeObjectForKey:bundle]; [finished removeObjectForKey:bundle];
-                NSString *message = [target[@"process"] integerValue] == AxsCacheKeeperProcessUnknown ? @"无法确认进程状态，暂不删除文件" : @"APP 运行中；完全退出后清理超过 60 秒的普通缓存";
+                NSString *message = target[@"processReason"];
                 if ([mode isEqual:@"auto"] && axs_cachekeeper_url_cache_enabled(states[bundle])) message = [message stringByAppendingFormat:@"\n%@", axs_cachekeeper_network_status(bundle)];
-                axs_cachekeeper_report(bundle, @"waiting", message, 0, 0, 0, paths, nil); continue;
+                axs_cachekeeper_report(bundle, @"waiting", message, 0, 0, 0, paths, nil, nil); continue;
             }
             NSArray *discovered=@[];
             NSString *discoveryError=@"";
@@ -230,7 +274,7 @@ void CKApplyDirectorySwitches(void) {
             if (!paths.count) {
                 [jobs removeObjectForKey:bundle];[finished removeObjectForKey:bundle];
                 NSString *message=discoveryError.length ? discoveryError : @"没有可处理的缓存目录；已尊重手动排除，网络限制按独立选项执行";
-                axs_cachekeeper_report(bundle,@"waiting",message,0,0,discoveryError.length ? 1 : 0,@[],axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil);continue;
+                axs_cachekeeper_report(bundle,@"waiting",message,0,0,discoveryError.length ? 1 : 0,@[],axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil,nil);continue;
             }
             NSString *signature = [NSString stringWithFormat:@"%@\n%@", [roots componentsJoinedByString:@"\n"], mode];
             NSDictionary *done = finished[bundle];
@@ -256,7 +300,7 @@ void CKApplyDirectorySwitches(void) {
                     NSArray *currentPaths = axs_cachekeeper_effective_paths(currentSelection[bundle],currentStates[bundle],discovered);
                     BOOL selected = [currentPaths isEqual:paths] && [axs_cachekeeper_mode(currentStates[bundle]) isEqual:mode];
                     allowed = readable && selected && currentPaths.count && axs_cachekeeper_wants_cleanup(currentStates[bundle]) && [Container(bundle).path isEqual:target[@"home"]] &&
-                        axs_cachekeeper_process(bundle) == AxsCacheKeeperProcessStopped;
+                        axs_cachekeeper_process(bundle,NULL) == AxsCacheKeeperProcessStopped;
                 });
                 return allowed;
             };
@@ -264,6 +308,7 @@ void CKApplyDirectorySwitches(void) {
             unsigned long long bytes = 0;
             BOOL complete = YES, cancelled = NO, checking = NO;
             NSString *error = @"";
+            NSMutableDictionary *directoryReports=[NSMutableDictionary new];
             for (AxsCacheKeeperSweep *sweep in job[@"sweeps"]) {
                 if (!cancelled) [sweep advance:256 shouldContinue:shouldContinue];
                 removed += sweep.removed; bytes += sweep.bytes; failures += sweep.failed;
@@ -272,6 +317,9 @@ void CKApplyDirectorySwitches(void) {
                 changedCount += sweep.changedCount;
                 complete &= sweep.complete; cancelled |= sweep.cancelled;
                 if (sweep.error.length) error = sweep.error;
+                NSString *relative=[sweep.root substringFromIndex:[target[@"home"] length]+1];
+                directoryReports[relative]=@{@"updated":NSDate.date,@"complete":@(sweep.complete),@"checking":@(sweep.checking),@"cancelled":@(sweep.cancelled),
+                    @"removed":@(sweep.removed),@"bytes":@(sweep.bytes),@"protected":@(sweep.protectedCount),@"recent":@(sweep.recentCount),@"changed":@(sweep.changedCount),@"failed":@(sweep.failed),@"error":sweep.error ?: @""};
             }
             NSUInteger deltaRemoved = removed-[job[@"removed"] unsignedIntegerValue];
             unsigned long long deltaBytes = bytes-[job[@"bytes"] unsignedLongLongValue];
@@ -291,7 +339,7 @@ void CKApplyDirectorySwitches(void) {
             }
             if (axs_cachekeeper_auto_discover(states[bundle])) message=[message stringByAppendingFormat:@"\n自动识别已纳入 %lu 个缓存根（手动排除保持关闭）",(unsigned long)paths.count];
             if (discoveryError.length) message=[message stringByAppendingFormat:@"\n%@",discoveryError];
-            axs_cachekeeper_report(bundle, phase, message, deltaRemoved, deltaBytes, failures, paths, axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil);
+            axs_cachekeeper_report(bundle, phase, message, deltaRemoved, deltaBytes, failures, paths, axs_cachekeeper_auto_discover(states[bundle]) ? discovered : nil, directoryReports);
             if (manual && (complete || cancelled)) dispatch_async(dispatch_get_main_queue(), ^{ [axs_cachekeeper_manual removeObject:bundle]; });
         }
         dispatch_async(dispatch_get_main_queue(), ^{ busy = NO; });

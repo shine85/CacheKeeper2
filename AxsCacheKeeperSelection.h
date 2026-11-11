@@ -41,8 +41,8 @@ static inline BOOL axs_cachekeeper_row_selected(NSString *path, NSArray *effecti
 }
 static inline NSArray<NSDictionary *> *axs_cachekeeper_prioritized_rows(NSArray *rows, NSArray *selected, id state) {
     NSArray *manageable=axs_cachekeeper_manageable_rows(rows);
-    // 目录开关记住用户选择；总开关关闭不丢掉排列中的已选状态。
-    NSArray *effective=axs_cachekeeper_effective_paths(selected,axs_cachekeeper_app_state(state,YES),axs_cachekeeper_enableable_paths(manageable));
+    // 保留配置，但显示和排序只反映实际启用状态。
+    NSArray *effective=axs_cachekeeper_effective_paths(selected,state,axs_cachekeeper_enableable_paths(manageable));
     return [manageable sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         BOOL left=axs_cachekeeper_row_selected(a[@"path"],effective),right=axs_cachekeeper_row_selected(b[@"path"],effective);
         if (left!=right) return left ? NSOrderedAscending : NSOrderedDescending;

@@ -4,6 +4,8 @@
 #import "../AxsCacheKeeperPolicy.h"
 #import "../AxsCacheKeeperSelection.h"
 #import "../AxsCacheKeeperFilza.h"
+#import "InspectionPage.h"
+#import "../AxsCacheKeeperInspection.h"
 #include <dlfcn.h>
 
 @interface CKScanPage : UITableViewController
@@ -62,7 +64,10 @@
     if (self.timer) return;
     self.actionStatus=nil;
     self.token=NSUUID.UUID.UUIDString;
-    if (![@{@"bundle":self.bundle,@"token":self.token} writeToFile:[self file:@"request.plist"] atomically:YES]) { [self message:@"无法提交检测，请重新安装插件。"];return; }
+    NSError *error=nil;
+    if (![@{@"bundle":self.bundle,@"token":self.token} writeToURL:[NSURL fileURLWithPath:[self file:@"request.plist"]] error:&error]) {
+        [self message:[NSString stringWithFormat:@"无法写入检测请求：%@（%@/%ld）。请检查配置目录是否存在、可写后重试。",error.localizedDescription,error.domain,(long)error.code]];return;
+    }
     self.started=NSProcessInfo.processInfo.systemUptime;
     self.scanButton.enabled=NO;
     self.enableAllButton.enabled=NO;
@@ -85,7 +90,7 @@
     if (NSProcessInfo.processInfo.systemUptime-self.started>25) {
         [self.timer invalidate];self.timer=nil;self.title=self.appName;self.scanButton.enabled=YES;
         [self axs_cachekeeper_reload];
-        [self message:@"检测超时，请注销桌面后重试。"];
+        [self message:@"尚未收到检测结果。可点击“检测目录”仅重试此 APP；巨大目录可点击该目录进入深度检测。持续无响应时再检查桌面进程是否加载插件及配置目录访问。"];
     }
 }
 - (void)viewWillAppear:(BOOL)animated {
@@ -164,6 +169,7 @@
 - (UIContextMenuConfiguration *)tableView:(UITableView *)table contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)path point:(CGPoint)point {
     NSString *relative=[self axs_cachekeeper_row_at:path][@"path"];
     if (!relative) return nil;
+    NSString *displayPath=relative;
     NSDictionary *history=[self axs_cachekeeper_display:@"snapshots.plist"][self.bundle];
     NSString *home=history[@"home"];
     if ([relative hasPrefix:@"Group/"]) {
@@ -179,7 +185,10 @@
         UIAction *open = [UIAction actionWithTitle:@"在 Filza 中打开目录" image:[UIImage systemImageNamed:@"folder"] identifier:nil handler:^(UIAction *action) {
             [self axs_cachekeeper_open_filza:fullPath];
         }];
-        return [UIMenu menuWithTitle:@"" children:@[open]];
+        UIAction *inspect=[UIAction actionWithTitle:@"深度检测／查看档案" image:[UIImage systemImageNamed:@"doc.text.magnifyingglass"] identifier:nil handler:^(UIAction *action) {
+            [self.navigationController pushViewController:[[AxsCacheKeeperInspectionPage alloc] initWithBundle:self.bundle path:displayPath] animated:YES];
+        }];
+        return [UIMenu menuWithTitle:@"" children:@[inspect,open]];
     }];
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)table { return 4; }
@@ -198,7 +207,7 @@
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
     if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。可能增加流量和重复加载，网络选项可随时关闭。";
     if (section==2) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
-    if (section==3) return self.unknownRows.count ? @"未知不是必需，也不等于垃圾。这里保留占用线索供进一步分析，不参加一键开启或自动清理。" : nil;
+    if (section==3) return self.unknownRows.count ? @"点击目录进入只读深度检测：类型组成、文件时间与最大文件。未知不等于必需，也不等于垃圾；不参加一键开启。" : nil;
     NSString *message=@"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后删除可识别媒体。已选目录内新增内容自动覆盖；新增标准缓存根按自动发现选项纳入，手动关闭的目录保持排除。";
     return self.scanError.length ? [self.scanError stringByAppendingFormat:@"\n%@",message] : message;
 }
@@ -282,7 +291,7 @@
     NSDictionary *config=[self axs_cachekeeper_display:@"directories.plist"];
     BOOL enabled=NO, partial=NO;
     NSDictionary *master=[self axs_cachekeeper_display:@"appEnabled.plist"];
-    NSMutableDictionary *viewState=axs_cachekeeper_app_state(master[self.bundle],YES);
+    id viewState=master[self.bundle];
     NSArray *available=axs_cachekeeper_enableable_paths(self.cacheRows);
     NSArray *effective=axs_cachekeeper_effective_paths(config[self.bundle],viewState,available);
     enabled=axs_cachekeeper_row_selected(relative,effective);
@@ -294,10 +303,12 @@
     NSString *growth=compared?[NSString stringWithFormat:@" · 变化 %+.2f MB",([row[@"bytes"] longLongValue]-previous)/1048576.0]:@" · 首次检测";
     BOOL masterOn=axs_cachekeeper_app_enabled(master[self.bundle]);
     BOOL manageable=axs_cachekeeper_row_manageable(row);
-    NSString *state=!manageable?@"仅供查看":(enabled?(!masterOn?@"已选中，等待打开 APP 总开关":(axs_cachekeeper_wants_cleanup(master[self.bundle])?@"已纳入；退出后处理通过预检的缓存":@"只禁止模式：不删除目录内文件")):@"未开启／已手动排除");
+    NSString *state=!manageable?@"仅供分析":(!masterOn?@"APP 未开启：不处理任何目录":(enabled?(axs_cachekeeper_wants_cleanup(master[self.bundle])?@"已纳入；退出后处理通过预检的缓存":@"只禁止模式：不删除目录内文件"):@"未开启／已手动排除"));
     if (partial) state=[state stringByAppendingString:@"（保留旧配置中选定的部分子目录）"];
     NSString *size=row[@"bytes"] ? [NSString stringWithFormat:@"%.2f MB%@%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完"] : @"自动发现，大小待检测";
-    cell.detailTextLabel.text=[NSString stringWithFormat:@"%@\n%@\n%@",size,axs_cachekeeper_directory_description(relative),state];
+    NSDictionary *snapshot=[self axs_cachekeeper_display:@"snapshots.plist"][self.bundle];
+    NSString *trend=axs_cachekeeper_growth_evidence(relative,snapshot[@"recentScans"] ?: @[],snapshot);
+    cell.detailTextLabel.text=[NSString stringWithFormat:@"%@\n%@\n%@\n%@\n点击查看档案／补测大小",size,axs_cachekeeper_directory_description(relative),state,trend];
     if (manageable) {
         UISwitch *toggle=[UISwitch new];toggle.on=enabled;toggle.enabled=!self.timer;toggle.accessibilityIdentifier=relative;
         [toggle addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
@@ -372,6 +383,8 @@
 }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path {
     [table deselectRowAtIndexPath:path animated:YES];
+    NSDictionary *row=[self axs_cachekeeper_row_at:path];
+    if (row) { [self.navigationController pushViewController:[[AxsCacheKeeperInspectionPage alloc] initWithBundle:self.bundle path:row[@"path"]] animated:YES];return; }
     if (path.section==2 && path.row==0) {
         self.showOtherData=!self.showOtherData;
         [self axs_cachekeeper_reload];
