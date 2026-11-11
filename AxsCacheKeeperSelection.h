@@ -13,13 +13,43 @@ static inline NSArray<NSDictionary *> *axs_cachekeeper_manageable_rows(NSArray *
 }
 static inline NSArray<NSDictionary *> *axs_cachekeeper_readonly_rows(NSArray *rows) {
     NSMutableArray *result=[NSMutableArray new];
-    for (NSDictionary *row in axs_cachekeeper_parent_rows(rows)) if (!axs_cachekeeper_row_manageable(row)) [result addObject:row];
+    for (NSDictionary *row in axs_cachekeeper_parent_rows(rows))
+        if (!axs_cachekeeper_hidden_directory(row[@"path"]) && !axs_cachekeeper_row_manageable(row)) [result addObject:row];
     return axs_cachekeeper_size_ordered_rows(result);
+}
+static inline NSArray<NSDictionary *> *axs_cachekeeper_unknown_rows(NSArray *rows) {
+    NSMutableArray *result=[NSMutableArray new];
+    for (NSDictionary *row in axs_cachekeeper_readonly_rows(rows))
+        if ([axs_cachekeeper_directory_kind(row[@"path"]) isEqual:@"unknown"]) [result addObject:row];
+    return result;
+}
+static inline NSArray<NSDictionary *> *axs_cachekeeper_known_readonly_rows(NSArray *rows) {
+    NSMutableArray *result=[NSMutableArray new];
+    for (NSDictionary *row in axs_cachekeeper_readonly_rows(rows))
+        if (![axs_cachekeeper_directory_kind(row[@"path"]) isEqual:@"unknown"]) [result addObject:row];
+    return result;
 }
 static inline NSArray<NSString *> *axs_cachekeeper_enableable_paths(NSArray *rows) {
     NSMutableArray *paths=[NSMutableArray new];
     for (NSDictionary *row in axs_cachekeeper_manageable_rows(rows)) [paths addObject:row[@"path"]];
     return axs_cachekeeper_cache_paths(paths);
+}
+static inline BOOL axs_cachekeeper_row_selected(NSString *path, NSArray *effectivePaths) {
+    for (NSString *selected in effectivePaths)
+        if (axs_cachekeeper_paths_overlap(path,selected)) return YES;
+    return NO;
+}
+static inline NSArray<NSDictionary *> *axs_cachekeeper_prioritized_rows(NSArray *rows, NSArray *selected, id state) {
+    NSArray *manageable=axs_cachekeeper_manageable_rows(rows);
+    // 目录开关记住用户选择；总开关关闭不丢掉排列中的已选状态。
+    NSArray *effective=axs_cachekeeper_effective_paths(selected,axs_cachekeeper_app_state(state,YES),axs_cachekeeper_enableable_paths(manageable));
+    return [manageable sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        BOOL left=axs_cachekeeper_row_selected(a[@"path"],effective),right=axs_cachekeeper_row_selected(b[@"path"],effective);
+        if (left!=right) return left ? NSOrderedAscending : NSOrderedDescending;
+        unsigned long long l=[a[@"bytes"] unsignedLongLongValue],r=[b[@"bytes"] unsignedLongLongValue];
+        if (l!=r) return l>r ? NSOrderedAscending : NSOrderedDescending;
+        return [a[@"path"] compare:b[@"path"]];
+    }];
 }
 static inline NSArray<NSDictionary *> *axs_cachekeeper_display_rows(NSArray *rows, NSArray *discovered) {
     NSMutableArray *result=[axs_cachekeeper_parent_rows(rows) mutableCopy];

@@ -6,6 +6,7 @@
 #import "../AxsCacheKeeperNetworkCache.h"
 #import "../AxsCacheKeeperDirectories.h"
 #import "../AxsCacheKeeperSelection.h"
+#import "../AxsCacheKeeperFilza.h"
 #import <objc/runtime.h>
 
 static void require(BOOL condition, NSString *message) {
@@ -18,6 +19,23 @@ static void writeMedia(NSString *path) {
     const unsigned char image[]={0x89,'P','N','G',13,10,26,10,0,0,0,0};
     require([[NSData dataWithBytes:image length:sizeof(image)] writeToFile:path atomically:YES], @"创建可识别的缓存文件");
 }
+
+@interface AxsTestOpenConfiguration : NSObject
+@property(nonatomic,copy) NSDictionary *frontBoardOptions;
+@end
+@implementation AxsTestOpenConfiguration
+@end
+@interface AxsTestWorkspace : NSObject
+@property(nonatomic,copy) NSString *expectedPath;
+- (void)openApplicationWithBundleIdentifier:(NSString *)bundle usingConfiguration:(AxsTestOpenConfiguration *)config completionHandler:(void (^)(BOOL,NSError *))completion;
+@end
+@implementation AxsTestWorkspace
+- (void)openApplicationWithBundleIdentifier:(NSString *)bundle usingConfiguration:(AxsTestOpenConfiguration *)config completionHandler:(void (^)(BOOL,NSError *))completion {
+    NSURL *url=config.frontBoardOptions[@"test-payload"];
+    BOOL accepted=[bundle isEqual:@"com.tigisoftware.Filza"] && url.isFileURL && [url.path isEqual:self.expectedPath];
+    completion(accepted,nil);
+}
+@end
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
@@ -42,8 +60,8 @@ int main(int argc, const char *argv[]) {
         NSDictionary *networkOff=@{@"enabled":@YES,@"mode":@"auto",@"urlCache":@NO};
         require(!axs_cachekeeper_should_prevent(networkOff) && axs_cachekeeper_wants_cleanup(networkOff), @"关闭独立网络开关不关闭自动清理");
         require(!axs_cachekeeper_url_cache_enabled(axs_cachekeeper_app_state(networkOff,NO)), @"修改总开关保留网络选项");
-        require([axs_cachekeeper_activation_paths(nil) isEqual:@[@"Library/Caches",@"tmp"]] &&
-            !axs_cachekeeper_activation_paths(@[]).count, @"首次开启预选标准路径，但保留用户明确清空的选择");
+        require(!axs_cachekeeper_activation_paths(nil).count &&
+            !axs_cachekeeper_activation_paths(@[]).count, @"新 APP 不默认选择缓存目录，空选择也保持为空");
         require(!axs_cachekeeper_selected_paths(@{@"com.tencent.xin":@[@"Library/Caches"]}, @{}, @"com.tencent.xin").count, @"未开启微信不得因残留目录记录被清理");
         require([axs_cachekeeper_selected_paths(selection, @{bundle:@{@"enabled":@YES,@"restrict":@NO}}, bundle) count] == 1, @"关闭限写不能关闭自动清理");
         require(!axs_cachekeeper_wants_restriction(@{@"enabled":@YES,@"restrict":@NO}), @"独立限写开关");
@@ -81,7 +99,17 @@ int main(int argc, const char *argv[]) {
         for (NSString *relative in directoryRoots) require([fm createDirectoryAtPath:[home stringByAppendingPathComponent:[relative stringByAppendingPathComponent:@"child/deep"]] withIntermediateDirectories:YES attributes:nil error:nil], @"目录扫描夹具");
         NSError *scanError=nil;
         NSArray *found=axs_cachekeeper_scan_directories([NSURL fileURLWithPath:home],&scanError);
-        require(!scanError && [NSSet setWithArray:found].count==directoryRoots.count && [[NSSet setWithArray:found] isEqual:[NSSet setWithArray:directoryRoots]], @"列出全部一级分类，包括日志、网络状态、快照和自定义目录，忽略所有后代");
+        require(!scanError && ![found containsObject:@"Documents"] && ![found containsObject:@"Library/WebKit"] &&
+            ![found containsObject:@"Library/Cookies"] && [found containsObject:@"Library/Application Support"] && [found containsObject:@"CustomData"], @"隐藏明确保护目录，混合用途与未知目录仍待分析");
+        require([axs_cachekeeper_directory_kind(@"Library/Application Support") isEqual:@"mixed"] &&
+            [axs_cachekeeper_directory_kind(@"CustomData") isEqual:@"unknown"] &&
+            [axs_cachekeeper_directory_kind(@"Library/Preferences") isEqual:@"protected"], @"不把所有白名单外目录都当成必需数据");
+        require(axs_cachekeeper_hidden_directory(@"Group/group.example/Library/Cookies") &&
+            !axs_cachekeeper_hidden_directory(@"Library/Application Support"), @"共享敏感目录同样隐藏，混合数据不武断认定必需");
+        NSArray *sorted=axs_cachekeeper_prioritized_rows(@[@{@"path":@"tmp",@"bytes":@1},@{@"path":@"Library/Caches",@"bytes":@999},@{@"path":@"Library/Logs",@"bytes":@500}],@[@"tmp"],@{@"enabled":@YES});
+        require([sorted[0][@"path"] isEqual:@"tmp"] && [sorted[1][@"path"] isEqual:@"Library/Caches"], @"已开启置顶，同组按大小排序");
+        NSArray *sortedAuto=axs_cachekeeper_prioritized_rows(sorted,@[],@{@"enabled":@YES,@"autoDiscover":@YES,@"excludedPaths":@[@"Library/Caches"]});
+        require([sortedAuto.lastObject[@"path"] isEqual:@"Library/Caches"], @"自动纳入与排除使用同一开启排序依据");
         require([axs_cachekeeper_directory_description(@"Library/Application Support") containsString:@"业务数据"] &&
             !axs_cachekeeper_cache_path(@"Library/Application Support"), @"业务数据明确标注且不可自动清理");
         NSArray *largeFirst=axs_cachekeeper_size_ordered_rows(@[@{@"path":@"tmp",@"bytes":@1},@{@"path":@"Documents",@"bytes":@500},@{@"path":@"tmp/child",@"bytes":@999}]);
@@ -122,7 +150,21 @@ int main(int argc, const char *argv[]) {
             axs_cachekeeper_auto_discover(savedStates[bundle]), @"一键开启自动模式、网络限制和新增缓存发现");
         require([savedStates[@"com.tencent.xin"] isEqual:otherState], @"一键预设不影响其他 APP");
         require(axs_cachekeeper_manageable_rows(detectedRows).count==2 &&
-            axs_cachekeeper_readonly_rows(detectedRows).count==4, @"仅可操作目录在主列表，只读项可折叠");
+            axs_cachekeeper_readonly_rows(detectedRows).count==3, @"可管理目录与待分析目录独立，敏感目录彻底隐藏");
+        require([axs_cachekeeper_unknown_rows(detectedRows) count]==0 && [axs_cachekeeper_known_readonly_rows(detectedRows) count]==3, @"已知混合/共享数据不混入未知目录");
+        NSString *filzaPath=[home stringByAppendingPathComponent:@"Library/Caches/中文 #?% folder"];
+        NSDictionary *legacyInfo=@{@"CFBundleURLTypes":@[@{@"CFBundleURLSchemes":@[@"filza"]} ]};
+        NSURL *legacyURL=axs_cachekeeper_filza_url(filzaPath,legacyInfo);
+        NSURL *modernURL=axs_cachekeeper_filza_url(filzaPath,@{@"CFBundleShortVersionString":@"5.0.1"});
+        require([legacyURL.scheme isEqual:@"filza"] && [legacyURL.path isEqual:filzaPath] && !legacyURL.query && !legacyURL.fragment, @"Filza 4 scheme 保留特殊路径字符");
+        require(modernURL.isFileURL && [modernURL.path isEqual:filzaPath], @"Filza 5 未注册 scheme 时生成定向文件 URL");
+        require(!axs_cachekeeper_filza_url(@"/private/var/../root",@{}) && !axs_cachekeeper_filza_url(@"relative",@{}), @"不投递不规范或相对路径");
+        AxsTestWorkspace *workspace=[AxsTestWorkspace new];workspace.expectedPath=filzaPath;
+        __block BOOL delivered=NO;__block NSError *openError=nil;
+        axs_cachekeeper_send_filza_document(workspace,[AxsTestOpenConfiguration new],@"test-payload",modernURL,^(BOOL success,NSError *error){delivered=success;openError=error;});
+        require(delivered && !openError, @"现代文件投递保持指定应用、文件 URL 和回调契约");
+        axs_cachekeeper_send_filza_document([NSObject new],[AxsTestOpenConfiguration new],@"test-payload",modernURL,^(BOOL success,NSError *error){delivered=success;openError=error;});
+        require(!delivered && openError, @"目标 API 不存在时明确失败，不模拟打开成功");
         NSDictionary *automaticState=savedStates[bundle];
         NSArray *discovered=@[@"Library/Caches",@"tmp",@"Library/Logs",@"Library/Application Support",@"Group/group.example/Library/Caches"];
         require([axs_cachekeeper_effective_paths(@[@"tmp"],automaticState,discovered) isEqual:@[@"Library/Caches",@"Library/Logs",@"tmp"]], @"自动发现只纳入标准缓存根并按父目录去重");

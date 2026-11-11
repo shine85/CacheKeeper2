@@ -57,14 +57,39 @@ static inline BOOL axs_cachekeeper_cache_path(NSString *path) {
     }
     return NO;
 }
+static inline NSString *axs_cachekeeper_inner_path(NSString *path) {
+    if (!axs_cachekeeper_relative_path(path)) return nil;
+    if (![path hasPrefix:@"Group/"]) return path;
+    NSArray *parts=[path componentsSeparatedByString:@"/"];
+    return parts.count>=3 ? [[parts subarrayWithRange:NSMakeRange(2,parts.count-2)] componentsJoinedByString:@"/"] : nil;
+}
+static inline BOOL axs_cachekeeper_hidden_directory(NSString *path) {
+    NSString *inner=axs_cachekeeper_inner_path(path);
+    if (!inner) return YES;
+    // 按明确持久化/敏感用途隐藏，不能将“白名单外”都推断为必需数据。
+    for (NSString *root in @[@"Documents",@"Inbox",@"Downloads",@"Library/Preferences",@"Library/Cookies",@"Library/WebKit",@"Library/Keychains"]) {
+        if ([inner caseInsensitiveCompare:root]==NSOrderedSame || [inner.lowercaseString hasPrefix:[root.lowercaseString stringByAppendingString:@"/"]]) return YES;
+    }
+    return NO;
+}
+static inline NSString *axs_cachekeeper_directory_kind(NSString *path) {
+    if (axs_cachekeeper_hidden_directory(path)) return @"protected";
+    if ([path hasPrefix:@"Group/"]) return @"shared";
+    if (axs_cachekeeper_cache_path(path)) return @"cache";
+    NSString *inner=axs_cachekeeper_inner_path(path);
+    for (NSString *root in @[@"Library/Application Support",@"Library/HTTPStorages",@"Library/SplashBoard",@"Library/Saved Application State"]) {
+        if ([inner isEqual:root] || [inner hasPrefix:[root stringByAppendingString:@"/"]]) return @"mixed";
+    }
+    return @"unknown";
+}
 static inline NSString *axs_cachekeeper_directory_description(NSString *path) {
     if ([path hasPrefix:@"Group/"]) return @"App Group 共享数据：可能被其他 APP 或扩展使用；仅统计，不锁不删";
     NSDictionary *descriptions=@{
         @"tmp":@"临时工作文件、导入导出与下载中转；仅识别出的媒体缓存可清理",
         @"Library/Caches":@"可重建缓存；普通媒体可清理，数据库与未知内容保留",
         @"Library/Logs":@"日志与诊断；日志、数据库 WAL 和未知内容保留",
-        @"Library/Application Support":@"业务数据、数据库、离线资源和运行组件；仅查看",
-        @"Library/HTTPStorages":@"HTTP 持久化数据与可能的会话状态；仅查看",
+        @"Library/Application Support":@"混合用途：业务数据、数据库、离线资源或缓存；未逐项验证可删性",
+        @"Library/HTTPStorages":@"混合用途：网络持久化数据与会话状态；未验证可删性",
         @"Library/WebKit":@"网页缓存、网站数据库与登录态；仅查看",
         @"Library/Cookies":@"Cookie 与登录会话；仅查看",
         @"Library/Preferences":@"APP 设置与偏好；仅查看",
@@ -75,7 +100,7 @@ static inline NSString *axs_cachekeeper_directory_description(NSString *path) {
         @"Inbox":@"导入或共享接收的用户文件；仅查看"
     };
     if (descriptions[path]) return descriptions[path];
-    return axs_cachekeeper_cache_path(path) ? @"缓存目录；仅清理可识别的普通媒体，其他内容保留" : @"APP 自定义数据，用途未确认；仅查看";
+    return axs_cachekeeper_cache_path(path) ? @"缓存目录；仅清理可识别的普通媒体，其他内容保留" : @"用途未确认：尚无证据证明是缓存或必需数据；不自动处理";
 }
 static inline BOOL axs_cachekeeper_ordinary_cache_file(NSString *relative) {
     return !axs_cachekeeper_protected_path(relative);
@@ -191,7 +216,7 @@ static inline NSMutableDictionary *axs_cachekeeper_app_state(id previous, BOOL e
         @"autoDiscover":@(axs_cachekeeper_auto_discover(previous)), @"excludedPaths":axs_cachekeeper_exclusions(previous)} mutableCopy];
 }
 static inline NSArray *axs_cachekeeper_activation_paths(id previous) {
-    return previous==nil ? @[@"Library/Caches",@"tmp"] : axs_cachekeeper_cache_paths(previous);
+    return axs_cachekeeper_cache_paths(previous);
 }
 static inline NSArray<NSString *> *axs_cachekeeper_selected_paths(NSDictionary *directories, NSDictionary *states, NSString *bundle) {
     if (!axs_cachekeeper_bundle_id(bundle) || ![directories isKindOfClass:NSDictionary.class]) return @[];

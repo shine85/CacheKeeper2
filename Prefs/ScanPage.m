@@ -3,6 +3,8 @@
 #include <sys/stat.h>
 #import "../AxsCacheKeeperPolicy.h"
 #import "../AxsCacheKeeperSelection.h"
+#import "../AxsCacheKeeperFilza.h"
+#include <dlfcn.h>
 
 @interface CKScanPage : UITableViewController
 @property(nonatomic,copy) NSString *bundle;
@@ -20,6 +22,8 @@
 @property(nonatomic,strong) NSArray *cacheRows;
 @property(nonatomic,strong) NSArray *otherRows;
 @property(nonatomic) BOOL showOtherData;
+@property(nonatomic,strong) NSArray *unknownRows;
+@property(nonatomic) BOOL showUnknownData;
 @property(nonatomic,copy) NSString *actionStatus;
 @end
 @implementation CKScanPage
@@ -34,8 +38,11 @@
     self.displayCache=nil;
     NSDictionary *report=[self axs_cachekeeper_display:[@"Status/" stringByAppendingFormat:@"%@.auto.plist",self.bundle]];
     NSArray *rows=axs_cachekeeper_display_rows(self.rows,report[@"discoveredPaths"]);
-    self.cacheRows=axs_cachekeeper_manageable_rows(rows);
-    self.otherRows=axs_cachekeeper_readonly_rows(rows);
+    NSDictionary *directories=[self axs_cachekeeper_display:@"directories.plist"];
+    NSDictionary *states=[self axs_cachekeeper_display:@"appEnabled.plist"];
+    self.cacheRows=axs_cachekeeper_prioritized_rows(rows,directories[self.bundle],states[self.bundle]);
+    self.otherRows=axs_cachekeeper_known_readonly_rows(rows);
+    self.unknownRows=axs_cachekeeper_unknown_rows(rows);
     self.enableAllButton.enabled=!self.timer && self.cacheRows.count>0;
     [self.tableView reloadData];
 }
@@ -92,12 +99,66 @@
     UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"目录检测" message:text preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];[self presentViewController:alert animated:YES completion:nil];
 }
+- (void)axs_cachekeeper_filza_error:(NSString *)reason path:(NSString *)path {
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Filza 目录打开失败" message:reason preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"复制目录路径" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        UIPasteboard.generalPasteboard.string=path;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+- (void)axs_cachekeeper_open_filza:(NSString *)path {
+    Class proxyClass=NSClassFromString(@"LSApplicationProxy");
+    SEL lookup=NSSelectorFromString(@"applicationProxyForIdentifier:");
+    id proxy=[proxyClass respondsToSelector:lookup] ? ((id(*)(id,SEL,id))objc_msgSend)(proxyClass,lookup,AxsCacheKeeperFilzaBundleID) : nil;
+    SEL bundleSelector=NSSelectorFromString(@"bundleURL");
+    NSURL *bundle=[proxy respondsToSelector:bundleSelector] ? ((id(*)(id,SEL))objc_msgSend)(proxy,bundleSelector) : nil;
+    NSDictionary *info=[bundle isKindOfClass:NSURL.class] ? [NSDictionary dictionaryWithContentsOfURL:[bundle URLByAppendingPathComponent:@"Info.plist"]] : nil;
+    if (!info) {
+        [self axs_cachekeeper_filza_error:@"无法读取系统注册的 Filza 信息；可能未安装、注册未刷新或访问受限。可先在桌面打开 Filza，再试一次。" path:path];return;
+    }
+    NSURL *url=axs_cachekeeper_filza_url(path,info);
+    if (!url) { [self axs_cachekeeper_filza_error:@"目录路径无效，未发送打开请求。" path:path];return; }
+    __weak typeof(self) weak=self;
+    __block BOOL finished=NO;
+    void (^complete)(BOOL,NSError *)=^(BOOL success,NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (finished) return;
+            finished=YES;
+            if (!success) {
+                NSString *details=error ? [NSString stringWithFormat:@"%@（%@/%ld）",error.localizedDescription,error.domain,(long)error.code] : @"系统拒绝了目录打开请求";
+                [weak axs_cachekeeper_filza_error:[NSString stringWithFormat:@"Filza %@：%@。这不等于 Filza 未安装。",info[@"CFBundleShortVersionString"] ?: @"",details] path:path];
+            } else {
+                weak.actionStatus=@"已向 Filza 发送目录打开请求";
+                [weak axs_cachekeeper_reload];
+            }
+        });
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,8*NSEC_PER_SEC),dispatch_get_main_queue(), ^{
+        complete(NO,[NSError errorWithDomain:@"CacheKeeper.Filza" code:2 userInfo:@{NSLocalizedDescriptionKey:@"系统未及时返回打开结果"}]);
+    });
+    if (!url.isFileURL) {
+        [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL success) {complete(success,nil);}];return;
+    }
+    // Filza 5 官方包没有 URL scheme，使用已存在的应用标识 + 文件投递接口。
+    static void *frontBoard;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{frontBoard=dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",RTLD_LAZY|RTLD_LOCAL);});
+    CFStringRef const *keyAddress=frontBoard ? (CFStringRef const *)dlsym(frontBoard,"FBSOpenApplicationOptionKeyPayloadURL") : NULL;
+    NSString *payloadKey=keyAddress ? (__bridge NSString *)*keyAddress : nil;
+    Class workspaceClass=NSClassFromString(@"LSApplicationWorkspace");
+    SEL shared=NSSelectorFromString(@"defaultWorkspace");
+    id workspace=[workspaceClass respondsToSelector:shared] ? ((id(*)(id,SEL))objc_msgSend)(workspaceClass,shared) : nil;
+    id configuration=[NSClassFromString(@"_LSOpenConfiguration") new];
+    axs_cachekeeper_send_filza_document(workspace,configuration,payloadKey,url,complete);
+}
 - (NSArray *)orderedRows {
     return self.cacheRows ?: @[];
 }
 - (NSDictionary *)axs_cachekeeper_row_at:(NSIndexPath *)path {
     if (path.section==1 && path.row<self.cacheRows.count) return self.cacheRows[path.row];
     if (path.section==2 && self.showOtherData && path.row>0 && path.row-1<self.otherRows.count) return self.otherRows[path.row-1];
+    if (path.section==3 && self.showUnknownData && path.row>0 && path.row-1<self.unknownRows.count) return self.unknownRows[path.row-1];
     return nil;
 }
 - (UIContextMenuConfiguration *)tableView:(UITableView *)table contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)path point:(CGPoint)point {
@@ -113,33 +174,31 @@
     }
     if (!axs_cachekeeper_relative_path(relative)) return nil;
     if (!home.length) return nil;
-    NSURLComponents *url = [NSURLComponents new];
-    url.scheme = @"filza";
-    url.host = @"";
-    url.path = [home stringByAppendingPathComponent:relative];
+    NSString *fullPath=[home stringByAppendingPathComponent:relative];
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray *suggested) {
         UIAction *open = [UIAction actionWithTitle:@"在 Filza 中打开目录" image:[UIImage systemImageNamed:@"folder"] identifier:nil handler:^(UIAction *action) {
-            [UIApplication.sharedApplication openURL:url.URL options:@{} completionHandler:^(BOOL success) {
-                if (!success) [self message:@"无法打开 Filza，请确认已安装。"];
-            }];
+            [self axs_cachekeeper_open_filza:fullPath];
         }];
         return [UIMenu menuWithTitle:@"" children:@[open]];
     }];
 }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)table { return self.otherRows.count ? 3 : 2; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)table { return 4; }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
     if (section==0) return 4;
     if (section==1) return MAX((NSUInteger)1,self.cacheRows.count);
-    return 1+(self.showOtherData ? self.otherRows.count : 0);
+    if (section==2) return self.otherRows.count ? 1+(self.showOtherData ? self.otherRows.count : 0) : 0;
+    return self.unknownRows.count ? 1+(self.showUnknownData ? self.unknownRows.count : 0) : 0;
 }
 - (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section {
     if (section==0) return @"缓存控制";
-    if (section==1) return [NSString stringWithFormat:@"可管理缓存 · %lu 个父目录",(unsigned long)self.cacheRows.count];
-    return @"其他数据占用";
+    if (section==1) return [NSString stringWithFormat:@"可管理缓存 · 已选置顶 · %lu 个父目录",(unsigned long)self.cacheRows.count];
+    if (section==2) return self.otherRows.count ? @"混合用途与共享数据" : nil;
+    return self.unknownRows.count ? @"用途未知 · 待分析" : nil;
 }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
     if (section==0) return @"一键开启 = 自动模式 + 网络磁盘缓存限制 + 新增缓存自动发现。可能增加流量和重复加载，网络选项可随时关闭。";
-    if (section==2) return @"业务数据仅用于解释占用，默认折叠。体积大不代表可删除，数据库、登录态和共享数据不在处理范围内。";
+    if (section==2) return self.otherRows.count ? @"这些目录可能同时包含资源、业务状态或缓存，尚未逐项确认；不自动清理。已知敏感持久化目录已隐藏。" : nil;
+    if (section==3) return self.unknownRows.count ? @"未知不是必需，也不等于垃圾。这里保留占用线索供进一步分析，不参加一键开启或自动清理。" : nil;
     NSString *message=@"首次使用产生的缓存也处理；仅在 APP 完全退出、文件超过 60 秒并通过预检后删除可识别媒体。已选目录内新增内容自动覆盖；新增标准缓存根按自动发现选项纳入，手动关闭的目录保持排除。";
     return self.scanError.length ? [self.scanError stringByAppendingFormat:@"\n%@",message] : message;
 }
@@ -200,11 +259,17 @@
         [toggle addTarget:self action:@selector(axs_cachekeeper_discovery_changed:) forControlEvents:UIControlEventValueChanged];
         cell.accessoryView=toggle;return cell;
     }
-    if (path.section==2 && path.row==0) {
+    if ((path.section==2 || path.section==3) && path.row==0) {
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-        cell.textLabel.text=[NSString stringWithFormat:@"%@ %lu 项其他占用",self.showOtherData ? @"收起" : @"查看",(unsigned long)self.otherRows.count];
-        cell.detailTextLabel.text=@"不参与一键开启，仅供排查空间去向";cell.detailTextLabel.numberOfLines=0;
-        cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;return cell;
+        BOOL unknown=path.section==3,expanded=unknown ? self.showUnknownData : self.showOtherData;
+        NSArray *items=unknown ? self.unknownRows : self.otherRows;
+        unsigned long long bytes=0;BOOL complete=YES;
+        for (NSDictionary *row in items) {bytes+=[row[@"bytes"] unsignedLongLongValue];complete&=[row[@"complete"] boolValue];}
+        cell.textLabel.text=[NSString stringWithFormat:@"%@%lu 项%@",expanded ? @"收起 " : @"展开 ",(unsigned long)items.count,unknown ? @"用途未知目录" : @"混合／共享数据"];
+        cell.textLabel.font=[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];cell.textLabel.textColor=UIColor.systemBlueColor;
+        cell.detailTextLabel.text=[NSString stringWithFormat:@"已统计 %.2f MB%@ · 不自动处理",bytes/1048576.0,complete ? @"" : @"（未统计完整）"];cell.detailTextLabel.numberOfLines=0;
+        cell.imageView.image=[UIImage systemImageNamed:unknown ? @"questionmark.folder" : @"folder"];
+        cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;cell.accessibilityValue=expanded ? @"已展开" : @"已折叠";return cell;
     }
     NSDictionary *row=[self axs_cachekeeper_row_at:path];
     if (!row) {
@@ -219,10 +284,9 @@
     NSDictionary *master=[self axs_cachekeeper_display:@"appEnabled.plist"];
     NSMutableDictionary *viewState=axs_cachekeeper_app_state(master[self.bundle],YES);
     NSArray *available=axs_cachekeeper_enableable_paths(self.cacheRows);
-    for (NSString *selected in axs_cachekeeper_effective_paths(config[self.bundle],viewState,available)) {
-        if ([selected isEqual:relative]) enabled=YES;
-        else if ([selected hasPrefix:[relative stringByAppendingString:@"/"]]) { enabled=YES;partial=YES; }
-    }
+    NSArray *effective=axs_cachekeeper_effective_paths(config[self.bundle],viewState,available);
+    enabled=axs_cachekeeper_row_selected(relative,effective);
+    for (NSString *selected in effective) if ([selected hasPrefix:[relative stringByAppendingString:@"/"]]) partial=YES;
     long long previous=0;BOOL compared=NO;
     for (NSDictionary *old in self.previous[@"rows"]) if ([old[@"path"] isEqual:relative]) {previous=[old[@"bytes"] longLongValue];compared=YES;break;}
     UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
@@ -245,10 +309,6 @@
     NSMutableDictionary *selected=axs_cachekeeper_edit_configuration([self file:@"directories.plist"]);
     NSMutableDictionary *states=axs_cachekeeper_edit_configuration([self file:@"appEnabled.plist"]);
     if (!selected || !states) { [self message:@"原配置存在但不可读，已停止保存。"]; [self axs_cachekeeper_reload]; return; }
-    if (toggle.on && !selected[self.bundle]) {
-        selected[self.bundle]=axs_cachekeeper_activation_paths(nil);
-        if (![selected writeToFile:[self file:@"directories.plist"] atomically:YES]) { toggle.on=NO; [self message:@"目录选择保存失败。"];return; }
-    }
     states[self.bundle]=axs_cachekeeper_app_state(states[self.bundle],toggle.on);
     if (![states writeToFile:[self file:@"appEnabled.plist"] atomically:YES]) [self message:@"总开关保存失败。"];
     else axs_cachekeeper_notify_preferences();
@@ -316,5 +376,6 @@
         self.showOtherData=!self.showOtherData;
         [self axs_cachekeeper_reload];
     }
+    if (path.section==3 && path.row==0) { self.showUnknownData=!self.showUnknownData;[self axs_cachekeeper_reload]; }
 }
 @end

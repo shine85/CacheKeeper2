@@ -152,10 +152,8 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     NSMutableDictionary *directories=axs_cachekeeper_edit_configuration(directoryPath);
     NSMutableDictionary *states=axs_cachekeeper_edit_configuration(jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist"));
     if (!directories || !states) { [self axs_cachekeeper_configuration_error]; [self updateBatch]; return; }
-    if (toggle.on && !directories[bundle]) directories[bundle]=axs_cachekeeper_activation_paths(nil);
     states[bundle]=axs_cachekeeper_app_state(states[bundle],toggle.on);
-    if (![directories writeToFile:directoryPath atomically:YES] ||
-        ![states writeToFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist") atomically:YES]) {
+    if (![states writeToFile:jbroot(@"/var/mobile/Library/CacheKeeper/appEnabled.plist") atomically:YES]) {
         UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"保存失败" message:@"缓存控制设置未完整保存，请检查安装与目录权限。" preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];

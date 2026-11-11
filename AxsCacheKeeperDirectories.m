@@ -59,7 +59,8 @@ NSArray<NSString *> *axs_cachekeeper_scan_directories(NSURL *home, NSError **err
                 continue;
             }
             if (!S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode)) continue;
-            [paths addObject:base.length ? [base stringByAppendingPathComponent:entry.lastPathComponent] : entry.lastPathComponent];
+            NSString *relative=base.length ? [base stringByAppendingPathComponent:entry.lastPathComponent] : entry.lastPathComponent;
+            if (!axs_cachekeeper_hidden_directory(relative)) [paths addObject:relative];
         }
     }
     return axs_cachekeeper_parent_paths(paths);
