@@ -29,6 +29,8 @@
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSArray *> *directorySnapshots;
 @property(nonatomic,strong) NSMutableDictionary<NSString *,NSMutableDictionary *> *fileSnapshots;
 @property(nonatomic,strong) NSMutableSet<NSString *> *checkedDirectories;
+@property(nonatomic,strong) NSMutableArray<NSDictionary *> *recordedFailures;
+@property(nonatomic,copy) int (^unlinkFile)(int, const char *);
 @end
 
 @implementation AxsCacheKeeperSweep
@@ -36,9 +38,13 @@
     return [self initWithRoot:root clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; }];
 }
 - (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock {
+    return [self initWithRoot:root clock:clock unlinkFile:^int(int fd,const char *name) { return unlinkat(fd,name,0); }];
+}
+- (instancetype)initWithRoot:(NSString *)root clock:(NSTimeInterval (^)(void))clock unlinkFile:(int (^)(int,const char *))unlinkFile {
     if (!(self = [super init])) return nil;
     _root = [root copy];
     _clock = [clock copy];
+    _unlinkFile=[unlinkFile copy];_recordedFailures=[NSMutableArray new];
     struct stat info;
     if (![root isEqual:[NSURL fileURLWithPath:root].URLByResolvingSymlinksInPath.path] ||
         lstat(root.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode)) {
@@ -116,13 +122,18 @@
 }
 - (BOOL)axs_cachekeeper_remove:(NSURL *)entry expected:(struct stat)expected {
     NSString *parent = entry.URLByDeletingLastPathComponent.path;
-    if (![parent isEqual:self.root] && ![parent hasPrefix:[self.root stringByAppendingString:@"/"]]) { errno = EINVAL; return NO; }
+    if (![parent isEqual:self.root] && ![parent hasPrefix:[self.root stringByAppendingString:@"/"]]) {
+        [self axs_cachekeeper_failure:@"枚举路径边界" code:EINVAL path:entry.path detail:[NSString stringWithFormat:@"root=%@; parent=%@",self.root,parent]];return NO;
+    }
     // 从已核对身份的缓存根逐级打开，不能靠 realpath 后再打开绝对路径防竞态。
     int fd = axs_cachekeeper_open_directory(self.root);
-    if (fd < 0) return NO;
+    if (fd < 0) { int code=errno;[self axs_cachekeeper_failure:@"open-root" code:code path:entry.path detail:self.root];return NO; }
     struct stat openedRoot;
-    if (fstat(fd, &openedRoot) || openedRoot.st_dev != self.device || openedRoot.st_ino != self.inode) {
-        close(fd); errno = ESTALE; return NO;
+    if (fstat(fd,&openedRoot)) {
+        int code=errno;close(fd);[self axs_cachekeeper_failure:@"fstat-root" code:code path:entry.path detail:self.root];return NO;
+    }
+    if (openedRoot.st_dev != self.device || openedRoot.st_ino != self.inode) {
+        close(fd);[self axs_cachekeeper_failure:@"根目录身份核对" code:ESTALE path:entry.path detail:@""];return NO;
     }
     NSString *relativeParent = [parent substringFromIndex:self.root.length];
     NSString *openedPath=self.root;
@@ -137,7 +148,7 @@
         int child = openat(fd, part.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
         int savedError = errno;
         close(fd);
-        if (child < 0) { errno = savedError; return NO; }
+        if (child < 0) { [self axs_cachekeeper_failure:@"openat-parent" code:savedError path:entry.path detail:openedPath];return NO; }
         fd = child;
         openedPath=[openedPath stringByAppendingPathComponent:part];
     }
@@ -149,34 +160,47 @@
         [self.dataDirectories addObject:parent];self.error=@"预检后目录发生变化，已跳过";
         close(fd);errno=EBUSY;return NO;
     }
-    const char *name = entry.lastPathComponent.fileSystemRepresentation;
+    NSString *fileName=entry.lastPathComponent;
+    const char *name = fileName.fileSystemRepresentation;
     BOOL removed = NO;
     int file = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
-    if (file >= 0 && !fstat(file, &current) && S_ISREG(current.st_mode) && current.st_nlink == 1 &&
+    if (file<0) { int code=errno;close(fd);[self axs_cachekeeper_failure:@"openat-file" code:code path:entry.path detail:@""];return NO; }
+    if (fstat(file,&current)) { int code=errno;close(file);close(fd);[self axs_cachekeeper_failure:@"fstat-file" code:code path:entry.path detail:@""];return NO; }
+    if (S_ISREG(current.st_mode) && current.st_nlink == 1 &&
         current.st_ino == expected.st_ino && current.st_dev == expected.st_dev &&
         axs_cachekeeper_old_enough(current, self.clock())) {
         unsigned char signature[32] = {0};
         ssize_t readCount = pread(file, signature, sizeof(signature), 0);
         BOOL database = readCount >= 15 && !memcmp(signature, "SQLite format 3", 15);
         BOOL propertyList = readCount >= 6 && !memcmp(signature, "bplist", 6);
-        if (readCount < 0) { self.error = @"无法核对文件内容，保留文件"; }
+        if (readCount < 0) { int code=errno;[self axs_cachekeeper_failure:@"pread" code:code path:entry.path detail:@""]; }
         else if (database || propertyList || !axs_cachekeeper_media_signature(signature, (size_t)readCount)) {
             if (database || propertyList) [self.dataDirectories addObject:parent];
             self.protectedCount++; errno = EBUSY;
         }
         else {
             struct stat final;
-            if (!fstatat(fd, name, &final, AT_SYMLINK_NOFOLLOW) && final.st_ino == current.st_ino &&
-                final.st_dev == current.st_dev && axs_cachekeeper_old_enough(final, self.clock())) removed = unlinkat(fd, name, 0) == 0;
-            else errno = ESTALE;
+            if (fstatat(fd,name,&final,AT_SYMLINK_NOFOLLOW)) {
+                int code=errno;[self axs_cachekeeper_failure:@"fstatat-final" code:code path:entry.path detail:@""];
+            } else if (final.st_ino == current.st_ino && final.st_dev == current.st_dev && axs_cachekeeper_old_enough(final, self.clock())) {
+                int result=self.unlinkFile(fd,name);int code=result ? errno : 0;
+                removed=result==0;
+                if (!removed) [self axs_cachekeeper_failure:@"unlinkat" code:code path:entry.path detail:@"flags=0"];
+            } else [self axs_cachekeeper_failure:@"删除前身份/时间核对" code:ESTALE path:entry.path detail:@""];
         }
-    } else { errno = ESTALE; }
+    } else [self axs_cachekeeper_failure:@"打开文件身份/时间核对" code:ESTALE path:entry.path detail:@""];
     int savedError = errno;
     if (removed && !fstat(fd,&parentInfo)) self.directorySnapshots[parent]=[self axs_cachekeeper_snapshot:parentInfo];
     if (removed) [self.fileSnapshots[parent] removeObjectForKey:entry.lastPathComponent];
     if (file >= 0) close(file);
     close(fd); errno = savedError;
     return removed;
+}
+- (NSArray<NSDictionary *> *)failureDetails { return [self.recordedFailures copy]; }
+- (void)axs_cachekeeper_failure:(NSString *)stage code:(int)code path:(NSString *)path detail:(NSString *)detail {
+    self.error=[NSString stringWithFormat:@"%@ 失败（errno %d：%s）",stage,code,strerror(code)];
+    if (self.recordedFailures.count<8) [self.recordedFailures addObject:@{@"stage":stage,@"code":@(code),@"path":path ?: @"",@"detail":detail ?: @""}];
+    errno=code;
 }
 - (void)advance:(NSUInteger)limit shouldContinue:(BOOL (^)(void))shouldContinue {
     if (self.complete || self.cancelled) return;
@@ -220,7 +244,7 @@
         if (!axs_cachekeeper_ordinary_cache_file(relative) || info.st_nlink != 1) { self.protectedCount++; continue; }
         if (!axs_cachekeeper_old_enough(info, self.clock())) { self.recentCount++; continue; }
         if ([self axs_cachekeeper_remove:entry expected:info]) { self.removed++; self.bytes += info.st_size; }
-        else if (errno != ENOENT && errno != EBUSY) { self.failed++; self.error = [NSString stringWithFormat:@"删除失败（errno %d）", errno]; }
+        else if (errno != ENOENT && errno != EBUSY) self.failed++;
     }
 }
 @end

@@ -9,6 +9,7 @@
 #import "../AxsCacheKeeperFilza.h"
 #import "../AxsCacheKeeperProcess.h"
 #import "../AxsCacheKeeperInspection.h"
+#import "../AxsCacheKeeperProbe.h"
 #import <objc/runtime.h>
 
 static void require(BOOL condition, NSString *message) {
@@ -61,6 +62,20 @@ int main(int argc, const char *argv[]) {
         require(![fm fileExistsAtPath:fixture], @"测试目录必须是新目录");
         require([fm createDirectoryAtPath:fixture withIntermediateDirectories:YES attributes:nil error:nil], @"创建测试目录");
         NSString *bundle = @"test.cache.app";
+        uint64_t probeRequest=axs_cachekeeper_probe_request(123,1000);
+        require(axs_cachekeeper_probe_fresh(probeRequest,1000) && axs_cachekeeper_probe_fresh(probeRequest,1300) &&
+            !axs_cachekeeper_probe_fresh(probeRequest,1301) && !axs_cachekeeper_probe_fresh(probeRequest,999) &&
+            !axs_cachekeeper_probe_fresh(axs_cachekeeper_probe_request(0,1000),1000), @"诊断请求必须带有效随机标识且五分钟内有效");
+        require([axs_cachekeeper_probe_description(axs_cachekeeper_probe_result(1,2)) containsString:@"授权失败"] &&
+            [axs_cachekeeper_probe_description(axs_cachekeeper_probe_result(2,257)) containsString:@"配置读取失败"] &&
+            [axs_cachekeeper_probe_description(axs_cachekeeper_probe_result(7,0)) containsString:@"写入失败"], @"注入、配置、容量和文件回执不混为同一状态");
+        NSString *probeName=axs_cachekeeper_probe_name(NSUUID.UUID.UUIDString,NO);
+        int sender=-1,receiver=-1;uint64_t observed=0;
+        require(notify_register_check(probeName.UTF8String,&sender)==NOTIFY_STATUS_OK &&
+            notify_register_check(probeName.UTF8String,&receiver)==NOTIFY_STATUS_OK &&
+            notify_set_state(sender,probeRequest)==NOTIFY_STATUS_OK && notify_get_state(receiver,&observed)==NOTIFY_STATUS_OK &&
+            observed==probeRequest, @"实际 Darwin state API 的多个注册可以读取同一诊断请求");
+        notify_cancel(sender);notify_cancel(receiver);
         NSString *reason=nil;
         require(axs_cachekeeper_process_state(nil,bundle,&reason)==AxsCacheKeeperProcessUnknown && reason.length, @"缺少进程接口不能判断已退出");
         AxsTestProcessManager *manager=[AxsTestProcessManager new];manager.allApplicationProcesses=@[];
@@ -254,6 +269,18 @@ int main(int argc, const char *argv[]) {
             [sweep advance:1 shouldContinue:^BOOL { return YES; }];
         }
         require(sweep.complete && sweep.removed == 2 && sweep.failed == 0, @"单项分批仍能完成遍历并删除新旧缓存");
+        NSString *errorRoot=[fixture stringByAppendingPathComponent:@"unlink-error"];
+        require([fm createDirectoryAtPath:errorRoot withIntermediateDirectories:YES attributes:nil error:nil], @"失败回执夹具");
+        writeMedia([errorRoot stringByAppendingPathComponent:@"old.png"]);
+        AxsCacheKeeperSweep *failureSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:errorRoot clock:^NSTimeInterval{return future;} unlinkFile:^int(int fd,const char *name) {
+            struct stat parent;require(!fstat(fd,&parent) && S_ISDIR(parent.st_mode) && !strcmp(name,"old.png"), @"删除仍限定已打开父目录和单一文件名");
+            errno=EINVAL;return -1;
+        }];
+        for (NSUInteger pass=0;!failureSweep.complete && pass<20;pass++) [failureSweep advance:2 shouldContinue:^BOOL{return YES;}];
+        require(failureSweep.complete && failureSweep.removed==0 && failureSweep.failed==1 &&
+            [failureSweep.error containsString:@"unlinkat"] && [failureSweep.failureDetails.firstObject[@"code"] intValue]==EINVAL &&
+            [failureSweep.failureDetails.firstObject[@"stage"] isEqual:@"unlinkat"] &&
+            [fm fileExistsAtPath:[errorRoot stringByAppendingPathComponent:@"old.png"]], @"真实删除返回 EINVAL 时保留文件并准确记录调用阶段，不能冒充已清理");
         require([fm fileExistsAtPath:outside] && [fm fileExistsAtPath:cache], @"保留根目录与链接外用户文件");
         NSString *subfolder=[cache stringByAppendingPathComponent:@"later/deep"];
         require([fm createDirectoryAtPath:subfolder withIntermediateDirectories:YES attributes:nil error:nil], @"已选父目录内新增子目录");
