@@ -61,7 +61,7 @@ void CKScanRequests(void) {
                 if (NSProcessInfo.processInfo.systemUptime>directoryDeadline || ++files>100000) {complete=NO;break;}
                 struct stat info;
                 if (lstat(entry.path.fileSystemRepresentation,&info)) {complete=NO;continue;}
-                if (S_ISLNK(info.st_mode)) {[entries skipDescendants];continue;}
+                if (S_ISLNK(info.st_mode)) continue;
                 if (S_ISREG(info.st_mode)) size+=info.st_size;
             }
             if (!entries || NSProcessInfo.processInfo.systemUptime>directoryDeadline) complete=NO;

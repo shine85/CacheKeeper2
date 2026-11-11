@@ -203,7 +203,8 @@
             if (errno != ENOENT) { self.failed++; self.error = @"无法读取缓存文件属性";[self.dataDirectories addObject:entry.URLByDeletingLastPathComponent.path]; }
             continue;
         }
-        if (S_ISLNK(info.st_mode)) { [self.entries skipDescendants]; continue; }
+        // URL 枚举器不递归符号链接；对非目录调用 skipDescendants 会影响后续遍历。
+        if (S_ISLNK(info.st_mode)) continue;
         if (self.checking) { self.inspected++;[self axs_cachekeeper_inspect:entry info:info]; continue; }
         if ([self axs_cachekeeper_is_data_directory:entry.path]) {
             self.protectedCount++;if (S_ISDIR(info.st_mode)) [self.entries skipDescendants];continue;
