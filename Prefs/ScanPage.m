@@ -2,6 +2,7 @@
 #include <roothide.h>
 #include <sys/stat.h>
 #import "../AxsCacheKeeperPolicy.h"
+#import "../AxsCacheKeeperSelection.h"
 
 @interface CKScanPage : UITableViewController
 @property(nonatomic,copy) NSString *bundle;
@@ -14,6 +15,8 @@
 @property(nonatomic,strong) NSTimer *statusTimer;
 @property(nonatomic,copy) NSString *scanError;
 @property(nonatomic,strong) NSMutableDictionary *displayCache;
+@property(nonatomic,strong) UIBarButtonItem *scanButton;
+@property(nonatomic,strong) UIBarButtonItem *enableAllButton;
 @end
 @implementation CKScanPage
 - (instancetype)init {return [super initWithStyle:UITableViewStyleInsetGrouped];}
@@ -25,6 +28,7 @@
 }
 - (void)axs_cachekeeper_reload {
     self.displayCache=nil;
+    self.enableAllButton.enabled=!self.timer && axs_cachekeeper_enableable_paths(self.rows).count>0;
     [self.tableView reloadData];
 }
 - (void)viewDidLoad {
@@ -33,22 +37,28 @@
     self.rows=axs_cachekeeper_parent_rows(history[self.bundle][@"rows"]);
     self.previous=@{@"rows":history[self.bundle][@"previousRows"]?:@[]};
     self.scanError=history[self.bundle][@"error"];
-    self.navigationItem.rightBarButtonItem=[[UIBarButtonItem alloc] initWithTitle:@"检测目录" style:UIBarButtonItemStylePlain target:self action:@selector(scan)];
+    self.scanButton=[[UIBarButtonItem alloc] initWithTitle:@"检测目录" style:UIBarButtonItemStylePlain target:self action:@selector(scan)];
+    self.enableAllButton=[[UIBarButtonItem alloc] initWithTitle:@"一键开启" style:UIBarButtonItemStylePlain target:self action:@selector(axs_cachekeeper_enable_all)];
+    self.enableAllButton.accessibilityLabel=@"开启此 APP 检测到的全部可管理缓存目录";
+    self.navigationItem.rightBarButtonItems=@[self.enableAllButton,self.scanButton];
+    [self axs_cachekeeper_reload];
 }
 - (void)scan {
     if (self.timer) return;
     self.token=NSUUID.UUID.UUIDString;
     if (![@{@"bundle":self.bundle,@"token":self.token} writeToFile:[self file:@"request.plist"] atomically:YES]) { [self message:@"无法提交检测，请重新安装插件。"];return; }
     self.started=NSProcessInfo.processInfo.systemUptime;
-    self.navigationItem.rightBarButtonItem.enabled=NO;
+    self.scanButton.enabled=NO;
+    self.enableAllButton.enabled=NO;
     self.title=@"正在检测…";
     __weak typeof(self) weak=self;
     self.timer=[NSTimer scheduledTimerWithTimeInterval:.5 repeats:YES block:^(NSTimer *timer){[weak check];}];
+    [self axs_cachekeeper_reload];
 }
 - (void)check {
     NSDictionary *result=[NSDictionary dictionaryWithContentsOfFile:[self file:@"scan.plist"]];
     if ([result[@"token"] isEqual:self.token]) {
-        [self.timer invalidate];self.timer=nil;self.navigationItem.rightBarButtonItem.enabled=YES;self.title=self.appName;
+        [self.timer invalidate];self.timer=nil;self.scanButton.enabled=YES;self.title=self.appName;
         self.rows=axs_cachekeeper_parent_rows(result[@"rows"]);
         self.previous=@{@"rows":result[@"previousRows"]?:@[]};
         self.scanError=result[@"error"];
@@ -57,7 +67,8 @@
         if (!self.rows.count) [self message:@"没有检测到候选目录。请先打开该应用再返回检测，或检查插件是否已加载。"];return;
     }
     if (NSProcessInfo.processInfo.systemUptime-self.started>25) {
-        [self.timer invalidate];self.timer=nil;self.title=self.appName;self.navigationItem.rightBarButtonItem.enabled=YES;
+        [self.timer invalidate];self.timer=nil;self.title=self.appName;self.scanButton.enabled=YES;
+        [self axs_cachekeeper_reload];
         [self message:@"检测超时，请注销桌面后重试。"];
     }
 }
@@ -103,7 +114,7 @@
 }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {return self.rows.count+3;}
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    NSString *message=@"按占用排序，父目录优先。Group/ 为共享容器，仅统计不清理。首次开启默认选择 Caches/tmp，已有选择保持不变。网络缓存开关独立控制，只限制磁盘且新 APP 默认关闭；只清理模式不使用此开关。选择目录、模式或网络选项都不会开启总开关。超过 60 秒的媒体缓存仍须通过数据目录预检，数据库目录及其后代、登录态和未知内容保留。不对目录限写。";
+    NSString *message=@"检测后可一键开启全部可管理目录，也可逐项开启，均直接打开此 APP 总开关，无需再次确认。仅查看目录与 Group/ 共享容器不纳入；模式和网络选项保持原选择。首次运行已有缓存也检查，不按开启时间保留；仅在 APP 完全退出且文件超过 60 秒后清理通过数据预检的媒体。已选父目录内新增文件/子目录自动覆盖，新顶级目录需重新检测选择。";
     return self.scanError.length ? [self.scanError stringByAppendingFormat:@"\n%@",message] : message;
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
@@ -117,7 +128,7 @@
         NSDictionary *selected=[self axs_cachekeeper_display:@"directories.plist"];
         UISwitch *toggle=[UISwitch new];
         toggle.on=axs_cachekeeper_app_enabled(states[self.bundle]);
-        if (!toggle.on) cell.detailTextLabel.text=@"未开启；检测、选择目录和模式均不会开启此 APP";
+        if (!toggle.on) cell.detailTextLabel.text=@"未开启；打开总开关、单项开启或一键开启后才生效";
         else if (!axs_cachekeeper_selected_paths(selected,states,self.bundle).count) cell.detailTextLabel.text=@"总开关已开启；未选择文件清理目录，网络缓存按独立选项执行";
         [toggle addTarget:self action:@selector(master:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
         return cell;
@@ -162,7 +173,7 @@
     if (partial) state=[state stringByAppendingString:@"（保留旧配置中选定的部分子目录）"];
     cell.detailTextLabel.text=[NSString stringWithFormat:@"%.2f MB%@%@\n%@\n%@\n%@",[row[@"bytes"] doubleValue]/1048576,growth,[row[@"complete"] boolValue]?@"":@" · 大小未统计完",
         axs_cachekeeper_directory_description(relative),manageable?@"可选择清理（受文件保护规则约束）":@"仅查看（不锁不删）",state];
-    UISwitch *toggle=[UISwitch new];toggle.on=enabled && manageable;toggle.enabled=manageable;toggle.accessibilityIdentifier=relative;
+    UISwitch *toggle=[UISwitch new];toggle.on=enabled && manageable;toggle.enabled=manageable && !self.timer;toggle.accessibilityIdentifier=relative;
     [toggle addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventValueChanged];cell.accessoryView=toggle;
     return cell;
 }
@@ -180,29 +191,20 @@
     [self axs_cachekeeper_reload];
 }
 - (void)save:(NSString *)relative enabled:(BOOL)enabled {
-    if (!axs_cachekeeper_cache_path(relative)) { [self message:@"此目录属于应用资源，不参与通用缓存清理。"];return; }
-    NSMutableDictionary *config=axs_cachekeeper_edit_configuration([self file:@"directories.plist"]);
-    if (!config || (config[self.bundle] && ![config[self.bundle] isKindOfClass:NSArray.class])) {
-        [self message:@"原配置不可读或目录记录损坏，已停止保存。"];return;
-    }
-    NSMutableArray *paths=[config[self.bundle] mutableCopy]?:[NSMutableArray new];
-    if (enabled && ![paths containsObject:relative]) [paths addObject:relative];
-    if (!enabled) {
-        for (NSString *path in [paths copy]) if ([path isEqual:relative] || [path hasPrefix:[relative stringByAppendingString:@"/"]]) [paths removeObject:path];
-    }
-    config[self.bundle]=axs_cachekeeper_cache_paths(paths);
-    if (![config writeToFile:[self file:@"directories.plist"] atomically:YES]) { [self message:@"目录选择保存失败。"];return; }
-    axs_cachekeeper_notify_preferences();
+    NSString *error=axs_cachekeeper_update_selection(jbroot(@"/var/mobile/Library/CacheKeeper"),self.bundle,@[relative],enabled);
+    if (error) [self message:error]; else axs_cachekeeper_notify_preferences();
     [self axs_cachekeeper_reload];
 }
 - (void)toggle:(UISwitch *)toggle {
-    NSString *relative=toggle.accessibilityIdentifier;
-    if (!toggle.on) {[self save:relative enabled:NO];return;}
-    toggle.on=NO;
-    UIAlertController *confirm=[UIAlertController alertControllerWithTitle:@"管理此缓存目录？" message:[relative stringByAppendingString:@"\n自动/只清理模式将在 APP 退出后清理超过 60 秒的普通缓存。数据库、登录态及未知格式保留；缓存可能需要重新下载。"] preferredStyle:UIAlertControllerStyleAlert];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"选择此目录" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){[self save:relative enabled:YES];}]];
-    [self presentViewController:confirm animated:YES completion:nil];
+    if (self.timer) { [self axs_cachekeeper_reload];return; }
+    [self save:toggle.accessibilityIdentifier enabled:toggle.on];
+}
+- (void)axs_cachekeeper_enable_all {
+    if (self.timer) return;
+    NSArray *paths=axs_cachekeeper_enableable_paths(self.rows);
+    NSString *error=axs_cachekeeper_update_selection(jbroot(@"/var/mobile/Library/CacheKeeper"),self.bundle,paths,YES);
+    if (error) [self message:error]; else axs_cachekeeper_notify_preferences();
+    [self axs_cachekeeper_reload];
 }
 - (void)axs_cachekeeper_save_mode:(NSString *)mode {
     NSString *path=[self file:@"appEnabled.plist"];

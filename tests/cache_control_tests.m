@@ -5,6 +5,7 @@
 #import "../AxsCacheKeeperSweep.h"
 #import "../AxsCacheKeeperNetworkCache.h"
 #import "../AxsCacheKeeperDirectories.h"
+#import "../AxsCacheKeeperSelection.h"
 #import <objc/runtime.h>
 
 static void require(BOOL condition, NSString *message) {
@@ -95,6 +96,37 @@ int main(int argc, const char *argv[]) {
         require(!scanError && shared.count==1 && [shared[0][@"path"] isEqual:@"Group/group.example/Library/Caches"] && [shared[0][@"readOnly"] boolValue], @"共享容器按父目录统计并显式只读");
         require(!axs_cachekeeper_cache_path(shared[0][@"path"]), @"手工改配置也不能清理共享容器");
 
+        NSArray *detectedRows=@[@{@"path":@"Library/Caches",@"manageable":@YES},
+            @{@"path":@"Library/Caches/video",@"manageable":@YES},@{@"path":@"tmp",@"manageable":@YES},
+            @{@"path":@"Documents",@"manageable":@YES},@{@"path":@"Library/Application Support"},
+            @{@"path":@"Group/group.example/Library/Caches",@"manageable":@YES},
+            @{@"path":@"Library/Logs",@"manageable":@NO}];
+        NSArray *enableAll=axs_cachekeeper_enableable_paths(detectedRows);
+        require([enableAll isEqual:@[@"Library/Caches",@"tmp"]], @"一键开启仅选择可管理父目录，拒绝共享和受保护目录");
+        NSString *preferences=[fixture stringByAppendingPathComponent:@"preferences"];
+        require([fm createDirectoryAtPath:preferences withIntermediateDirectories:YES attributes:nil error:nil], @"创建配置测试目录");
+        NSString *statesPath=[preferences stringByAppendingPathComponent:@"appEnabled.plist"];
+        NSString *directoriesPath=[preferences stringByAppendingPathComponent:@"directories.plist"];
+        NSDictionary *otherState=@{@"enabled":@NO,@"mode":@"auto",@"urlCache":@NO};
+        require([@{bundle:@{@"enabled":@NO,@"mode":@"clean",@"urlCache":@YES},@"com.tencent.xin":otherState} writeToFile:statesPath atomically:YES], @"建立已有模式与特殊 APP 配置");
+        require([@{@"com.tencent.xin":@[@"Library/Caches"]} writeToFile:directoriesPath atomically:YES], @"建立其他 APP 目录配置");
+        require(!axs_cachekeeper_update_selection(preferences,bundle,enableAll,YES), @"一键开启保存成功");
+        NSDictionary *savedStates=[NSDictionary dictionaryWithContentsOfFile:statesPath];
+        NSDictionary *savedDirectories=[NSDictionary dictionaryWithContentsOfFile:directoriesPath];
+        require(axs_cachekeeper_app_enabled(savedStates[bundle]) && [savedDirectories[bundle] isEqual:enableAll], @"一键开启同时打开本 APP 总开关与所选目录");
+        require([savedStates[bundle][@"mode"] isEqual:@"clean"] && [savedStates[bundle][@"urlCache"] boolValue] &&
+            [savedStates[@"com.tencent.xin"] isEqual:otherState], @"保留当前模式、网络选项和其他 APP 状态");
+        require(!axs_cachekeeper_update_selection(preferences,bundle,@[@"Library/Caches"],NO), @"直接取消父目录");
+        require([([NSDictionary dictionaryWithContentsOfFile:directoriesPath][bundle]) isEqual:@[@"tmp"]], @"取消不影响其他已选目录");
+        require(!axs_cachekeeper_update_selection(preferences,@"single.app",@[@"Library/Caches/video"],YES), @"单项开启无需另开总开关");
+        require(axs_cachekeeper_app_enabled([NSDictionary dictionaryWithContentsOfFile:statesPath][@"single.app"]), @"单项开启仅激活对应 APP");
+        NSData *beforeInvalid=[NSData dataWithContentsOfFile:directoriesPath];
+        require(axs_cachekeeper_update_selection(preferences,bundle,@[@"Documents"],YES)!=nil &&
+            [[NSData dataWithContentsOfFile:directoriesPath] isEqual:beforeInvalid], @"非法目录不改变现有配置");
+        require([@"broken state" writeToFile:statesPath atomically:YES encoding:NSUTF8StringEncoding error:nil], @"损坏状态夹具");
+        require(axs_cachekeeper_update_selection(preferences,bundle,enableAll,YES)!=nil &&
+            [[NSData dataWithContentsOfFile:directoriesPath] isEqual:beforeInvalid], @"损坏配置时不写入部分选择");
+
         NSString *cache = [fixture stringByAppendingPathComponent:@"cache"];
         require([fm createDirectoryAtPath:cache withIntermediateDirectories:NO attributes:nil error:nil], @"创建缓存根");
         NSString *outside = [fixture stringByAppendingPathComponent:@"user-document"];
@@ -122,6 +154,13 @@ int main(int argc, const char *argv[]) {
         }
         require(sweep.complete && sweep.removed == 2 && sweep.failed == 0, @"单项分批仍能完成遍历并删除新旧缓存");
         require([fm fileExistsAtPath:outside] && [fm fileExistsAtPath:cache], @"保留根目录与链接外用户文件");
+        NSString *subfolder=[cache stringByAppendingPathComponent:@"later/deep"];
+        require([fm createDirectoryAtPath:subfolder withIntermediateDirectories:YES attributes:nil error:nil], @"已选父目录内新增子目录");
+        NSString *laterFile=[subfolder stringByAppendingPathComponent:@"later.cache"];
+        writeMedia(laterFile);
+        AxsCacheKeeperSweep *nextSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:cache clock:^NSTimeInterval{return NSDate.date.timeIntervalSince1970+120;}];
+        for (NSUInteger pass=0;!nextSweep.complete && pass<100;pass++) [nextSweep advance:2 shouldContinue:^BOOL{return YES;}];
+        require(nextSweep.complete && nextSweep.removed==1 && ![fm fileExistsAtPath:laterFile], @"后续扫描自动覆盖父目录中新生子目录，无需新增配置");
         require([fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"business.sqlite"]] &&
             [fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"paired.png"]] &&
             [fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"assets/attachment.png"]] && [fm fileExistsAtPath:disguised], @"数据库目录及配套媒体、后代整体保留，其他独立目录仍可清理");

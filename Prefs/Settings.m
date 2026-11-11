@@ -47,7 +47,7 @@ static id axs_cachekeeper_app_property(id object, NSString *name) {
     return [NSString stringWithFormat:@"已安装 %lu 个 APP · 点击设置，默认不开启",(unsigned long)self.apps.count];
 }
 - (NSString *)tableView:(UITableView *)table titleForFooterInSection:(NSInteger)section {
-    return self.appsError ?: @"列出系统注册的已安装 APP。只有主动开启总开关的 APP 才应用缓存控制；检测、选择目录、切换模式均不自动开启。微信等特殊 APP 保持关闭即可。检测全部只统计，不清理。";
+    return self.appsError ?: @"只有主动开启的 APP 才应用缓存控制；可打开总开关，也可在检测后单项或一键开启。检测和切换模式不启用 APP，微信等特殊 APP 保持关闭即可。";
 }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     NSDictionary *app = self.visibleApps[path.row];
