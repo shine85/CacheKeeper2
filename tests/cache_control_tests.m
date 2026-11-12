@@ -31,10 +31,16 @@ static void writeMedia(NSString *path) {
 @interface AxsTestProcess : NSObject
 @property(nonatomic,copy) NSString *bundleIdentifier;
 @property(nonatomic) BOOL running;
+@property(nonatomic,strong) id state;
 - (BOOL)isRunning;
 @end
 @implementation AxsTestProcess
 - (BOOL)isRunning { return self.running; }
+@end
+@interface AxsTestTaskState : NSObject
+@property(nonatomic) NSInteger taskState;
+@end
+@implementation AxsTestTaskState
 @end
 @interface AxsTestProcessManager : NSObject
 @property(nonatomic,strong) id allApplicationProcesses;
@@ -86,6 +92,12 @@ int main(int argc, const char *argv[]) {
         require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessUnknown, @"nil 清单不能模拟空数组成功");
         AxsTestProcess *application=[AxsTestProcess new];application.bundleIdentifier=bundle;manager.allApplicationProcesses=@[application];
         require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessRunning, @"保留启动或退出中的进程记录，不依赖瞬时 isRunning");
+        AxsTestTaskState *task=[AxsTestTaskState new];task.taskState=2;application.state=task;
+        require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessRunning &&
+            [reason containsString:@"taskState=2"], @"有进程记录时仍禁止清理，并保留执行状态原始值供诊断");
+        application.state=nil;
+        require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessRunning &&
+            [reason containsString:@"taskState=不可读"], @"执行状态接口缺失只能报告不可读，不能模拟退出");
         manager.allApplicationProcesses=@[[NSObject new]];
         require(axs_cachekeeper_process_state(manager,bundle,&reason)==AxsCacheKeeperProcessUnknown, @"不完整的进程记录不得授权删除");
         NSDictionary *selection = @{bundle:@[@"Library/Caches/a", @"Library/Caches", @"Library/Caches/a",
@@ -136,6 +148,11 @@ int main(int argc, const char *argv[]) {
         NSString *summary = axs_cachekeeper_summary(@{@"rows":@[@{}]}, @{@"phase":@"auto", @"message":@"限写失败",
             @"removed":@3, @"bytes":@1048576, @"failed":@1});
         require([summary containsString:@"1 个"] && [summary containsString:@"3 个"] && [summary containsString:@"限写失败"], @"检测与清理结果同时可见");
+        NSTimeZone *previousZone=NSTimeZone.defaultTimeZone;
+        [NSTimeZone setDefaultTimeZone:[NSTimeZone timeZoneWithName:@"Asia/Shanghai"]];
+        NSString *localSummary=axs_cachekeeper_summary(nil,@{@"updated":[NSDate dateWithTimeIntervalSince1970:0]});
+        require([localSummary containsString:@"1970-01-01 08:00:00"] && ![localSummary containsString:@"+0000"], @"清理回执显示设备本地时间，不能直接使用 NSDate 的 UTC 描述");
+        [NSTimeZone setDefaultTimeZone:previousZone];
 
         NSString *home=[fixture stringByAppendingPathComponent:@"app-home"];
         NSArray *directoryRoots=@[@"tmp",@"Library/Caches",@"Library/Logs",@"Library/Application Support",@"Library/HTTPStorages",@"Library/WebKit",@"Library/Cookies",@"Library/SplashBoard",@"Library/Saved Application State",@"Documents",@"CustomData",@".cache"];
