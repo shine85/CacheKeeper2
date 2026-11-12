@@ -10,6 +10,7 @@
 #import "../AxsCacheKeeperProcess.h"
 #import "../AxsCacheKeeperInspection.h"
 #import "../AxsCacheKeeperProbe.h"
+#import "../AxsCacheKeeperFileAccess.h"
 #import <objc/runtime.h>
 
 static void require(BOOL condition, NSString *message) {
@@ -153,6 +154,14 @@ int main(int argc, const char *argv[]) {
         NSString *localSummary=axs_cachekeeper_summary(nil,@{@"updated":[NSDate dateWithTimeIntervalSince1970:0]});
         require([localSummary containsString:@"1970-01-01 08:00:00"] && ![localSummary containsString:@"+0000"], @"清理回执显示设备本地时间，不能直接使用 NSDate 的 UTC 描述");
         [NSTimeZone setDefaultTimeZone:previousZone];
+        require([axs_cachekeeper_time_string(@"broken date") isEqual:@"时间未知"], @"损坏时间字段显示未知而非伪造时间");
+        NSArray *pathAliases=@[@"/private/var/example/cache",@"/var/example/cache"];
+        require([axs_cachekeeper_enumerated_path(@"/var/example/cache/deep/file.png",pathAliases[0],pathAliases)
+            isEqual:@"/private/var/example/cache/deep/file.png"] &&
+            [axs_cachekeeper_enumerated_path(@"/private/var/example/cache/deep/",pathAliases[0],pathAliases)
+            isEqual:@"/private/var/example/cache/deep"], @"仅转换根别名与目录尾斜杠，不改变后代路径");
+        for (NSString *invalid in @[@"/var/example/cache-other/file",@"/var/example/cache/../outside",@"/var/example/cache/a//file",@"/var/example/cache/a/./file",@"/var/example/cache"])
+            require(!axs_cachekeeper_enumerated_path(invalid,pathAliases[0],pathAliases), @"拒绝越界前缀、空组件与路径穿越");
 
         NSString *home=[fixture stringByAppendingPathComponent:@"app-home"];
         NSArray *directoryRoots=@[@"tmp",@"Library/Caches",@"Library/Logs",@"Library/Application Support",@"Library/HTTPStorages",@"Library/WebKit",@"Library/Cookies",@"Library/SplashBoard",@"Library/Saved Application State",@"Documents",@"CustomData",@".cache"];
@@ -312,6 +321,41 @@ int main(int argc, const char *argv[]) {
         require([fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"business.sqlite"]] &&
             [fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"paired.png"]] &&
             [fm fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"assets/attachment.png"]] && [fm fileExistsAtPath:disguised], @"数据库目录及配套媒体、后代整体保留，其他独立目录仍可清理");
+        for (NSNumber *batchLimit in @[@1,@64]) {
+            NSString *deepRoot=[fixture stringByAppendingPathComponent:[NSString stringWithFormat:@"deep-keys-%@",batchLimit]];
+            require([fm createDirectoryAtPath:[deepRoot stringByAppendingPathComponent:@"a/b/c/d"] withIntermediateDirectories:YES attributes:nil error:nil], @"四级快照键夹具");
+            writeMedia([deepRoot stringByAppendingPathComponent:@"root.png"]);
+            writeMedia([deepRoot stringByAppendingPathComponent:@"a/b/c/d/image.png"]);
+            require([fm createDirectoryAtPath:[deepRoot stringByAppendingPathComponent:@"store/assets"] withIntermediateDirectories:YES attributes:nil error:nil], @"数据库关联目录夹具");
+            writeFile([deepRoot stringByAppendingPathComponent:@"store/data.sqlite"]);
+            NSString *attachment=[deepRoot stringByAppendingPathComponent:@"store/assets/keep.png"];
+            writeMedia(attachment);
+            AxsCacheKeeperInspection *deepInspection=[[AxsCacheKeeperInspection alloc] initWithRoot:deepRoot];
+            for (NSUInteger pass=0;!deepInspection.complete && pass<80;pass++) [deepInspection advance:batchLimit.unsignedIntegerValue];
+            NSDictionary *deepProfile=[deepInspection report];
+            require([deepProfile[@"coverageComplete"] boolValue] && [deepProfile[@"files"] unsignedIntegerValue]==4, @"深度检测用同一规范路径读取完整四级目录");
+            AxsCacheKeeperSweep *deepSweep=[[AxsCacheKeeperSweep alloc] initWithRoot:deepRoot clock:^NSTimeInterval{return future;}];
+            for (NSUInteger pass=0;!deepSweep.complete && pass<100;pass++) [deepSweep advance:batchLimit.unsignedIntegerValue shouldContinue:^BOOL{return YES;}];
+            require(deepSweep.complete && deepSweep.removed==2 && deepSweep.failed==0 && deepSweep.changedCount==0 &&
+                [fm fileExistsAtPath:attachment], @"大小批次都使用一致的父目录与快照键，数据库后代继续保留");
+        }
+        NSString *replacedRoot=[fixture stringByAppendingPathComponent:@"replaced-root"];
+        NSString *externalRoot=[fixture stringByAppendingPathComponent:@"external-root"];
+        require([fm createDirectoryAtPath:replacedRoot withIntermediateDirectories:YES attributes:nil error:nil] &&
+            [fm createDirectoryAtPath:[externalRoot stringByAppendingPathComponent:@"child"] withIntermediateDirectories:YES attributes:nil error:nil], @"根目录替换夹具");
+        NSString *externalMedia=[externalRoot stringByAppendingPathComponent:@"keep.png"];
+        writeMedia(externalMedia);writeMedia([replacedRoot stringByAppendingPathComponent:@"old.png"]);
+        AxsCacheKeeperSweep *replaced=[[AxsCacheKeeperSweep alloc] initWithRoot:replacedRoot clock:^NSTimeInterval{return future;}];
+        for (NSUInteger pass=0;replaced.checking && !replaced.complete && pass<20;pass++) [replaced advance:1 shouldContinue:^BOOL{return YES;}];
+        require(!replaced.checking && !replaced.complete && replaced.removed==0, @"根替换发生在完整预检后且删除前");
+        require([fm moveItemAtPath:replacedRoot toPath:[replacedRoot stringByAppendingString:@"-saved"] error:nil] &&
+            !symlink(externalRoot.fileSystemRepresentation,replacedRoot.fileSystemRepresentation), @"预检后用链接替换根目录");
+        [replaced advance:64 shouldContinue:^BOOL{return YES;}];
+        require(replaced.complete && replaced.removed==0 && replaced.failed>0 && [fm fileExistsAtPath:externalMedia], @"根目录被换成链接时停止清理，外部媒体仍保留");
+        int linked=axs_cachekeeper_open_directory(replacedRoot);
+        require(linked<0, @"共享访问函数继续拒绝末级目录链接");
+        linked=axs_cachekeeper_open_directory([replacedRoot stringByAppendingPathComponent:@"child"]);
+        require(linked<0, @"共享访问函数继续拒绝中间目录链接");
         NSString *lateDir=[fixture stringByAppendingPathComponent:@"late-database"];
         require([fm createDirectoryAtPath:lateDir withIntermediateDirectories:YES attributes:nil error:nil], @"延迟发现数据库夹具");
         writeMedia([lateDir stringByAppendingPathComponent:@"a.png"]);

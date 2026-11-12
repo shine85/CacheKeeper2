@@ -249,8 +249,7 @@
 - (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section {
     if (section==0) return @"缓存控制";
     if (section==1) {
-        NSDateFormatter *formatter=[NSDateFormatter new];formatter.dateFormat=@"MM-dd HH:mm:ss";
-        return [NSString stringWithFormat:@"可管理缓存 · 已选置顶 · %lu 个父目录\n大小快照：%@（点击检测目录刷新）",(unsigned long)self.cacheRows.count,self.scanUpdated ? [formatter stringFromDate:self.scanUpdated] : @"尚未检测"];
+        return [NSString stringWithFormat:@"可管理缓存 · 已选置顶 · %lu 个父目录\n大小快照：%@（点击检测目录刷新）",(unsigned long)self.cacheRows.count,self.scanUpdated ? axs_cachekeeper_time_string(self.scanUpdated) : @"尚未检测"];
     }
     if (section==2) return self.otherRows.count ? @"混合用途与共享数据" : nil;
     return self.unknownRows.count ? @"用途未知 · 待分析" : nil;
@@ -323,7 +322,7 @@
         UITableViewCell *cell=[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
         cell.textLabel.text=@"检查网络限制";cell.textLabel.textColor=UIColor.systemBlueColor;cell.detailTextLabel.numberOfLines=0;
         NSDictionary *previous=[self axs_cachekeeper_display:[NSString stringWithFormat:@"Status/%@.probe.plist",self.bundle]];
-        cell.detailTextLabel.text=self.probeStatus ?: (previous[@"message"] ? [NSString stringWithFormat:@"上次诊断（%@）：%@\n点击重新检查",previous[@"updated"],previous[@"message"]] : @"点击后打开此 APP 一次，再返回查看注入、配置读取和网络容量的实际结果");
+        cell.detailTextLabel.text=self.probeStatus ?: (previous[@"message"] ? [NSString stringWithFormat:@"上次诊断（%@）：%@\n点击重新检查",axs_cachekeeper_time_string(previous[@"updated"]),previous[@"message"]] : @"点击后打开此 APP 一次，再返回查看注入、配置读取和网络容量的实际结果");
         cell.accessoryType=UITableViewCellAccessoryDisclosureIndicator;return cell;
     }
     if ((path.section==2 || path.section==3) && path.row==0) {

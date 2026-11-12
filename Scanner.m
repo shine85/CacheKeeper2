@@ -170,11 +170,11 @@ static NSString *axs_cachekeeper_network_status(NSString *bundle) {
     NSDictionary *report = [NSDictionary dictionaryWithContentsOfFile:path];
     if (![report isKindOfClass:NSDictionary.class]) {
         NSDictionary *probe=[NSDictionary dictionaryWithContentsOfFile:[[axs_cachekeeper_folder() stringByAppendingPathComponent:@"Status"] stringByAppendingPathComponent:[bundle stringByAppendingString:@".probe.plist"]]];
-        if ([probe[@"message"] isKindOfClass:NSString.class]) return [NSString stringWithFormat:@"尚无网络文件回执；上次主动诊断（%@）：%@",probe[@"updated"],probe[@"message"]];
+        if ([probe[@"message"] isKindOfClass:NSString.class]) return [NSString stringWithFormat:@"尚无网络文件回执；上次主动诊断（%@）：%@",axs_cachekeeper_time_string(probe[@"updated"]),probe[@"message"]];
         return @"尚无网络文件回执；请点“检查网络限制”后打开此 APP，再返回查看原因";
     }
     NSString *message = [report[@"message"] isKindOfClass:NSString.class] ? report[@"message"] : @"回执格式不完整";
-    return [NSString stringWithFormat:@"网络缓存回执：%@（%@）", message, report[@"updated"] ?: @"时间未知"];
+    return [NSString stringWithFormat:@"网络缓存回执：%@（%@）", message, axs_cachekeeper_time_string(report[@"updated"])];
 }
 void axs_cachekeeper_request_cleanup(NSString *bundle) {
     if (!axs_cachekeeper_bundle_id(bundle)) return;
