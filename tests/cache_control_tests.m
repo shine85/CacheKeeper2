@@ -152,7 +152,8 @@ int main(int argc, const char *argv[]) {
         NSTimeZone *previousZone=NSTimeZone.defaultTimeZone;
         [NSTimeZone setDefaultTimeZone:[NSTimeZone timeZoneWithName:@"Asia/Shanghai"]];
         NSString *localSummary=axs_cachekeeper_summary(nil,@{@"updated":[NSDate dateWithTimeIntervalSince1970:0]});
-        require([localSummary containsString:@"1970-01-01 08:00:00"] && ![localSummary containsString:@"+0000"], @"清理回执显示设备本地时间，不能直接使用 NSDate 的 UTC 描述");
+        require([localSummary containsString:@"1970-01-01 08:00:00"] && ![localSummary containsString:@"+0000"],
+            [NSString stringWithFormat:@"清理回执显示设备本地时间（actual=%@; default=%@; local=%@; system=%@）",localSummary,NSTimeZone.defaultTimeZone,NSTimeZone.localTimeZone,NSTimeZone.systemTimeZone]);
         [NSTimeZone setDefaultTimeZone:previousZone];
         require([axs_cachekeeper_time_string(@"broken date") isEqual:@"时间未知"], @"损坏时间字段显示未知而非伪造时间");
         NSArray *pathAliases=@[@"/private/var/example/cache",@"/var/example/cache"];
