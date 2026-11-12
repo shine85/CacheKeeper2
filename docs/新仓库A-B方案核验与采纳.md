@@ -30,6 +30,7 @@
 
 - 修复前测试提交 `aa60a94` 已在 [Actions 43143673204](https://github.com/shine85/CacheKeeper2/actions/runs/43143673204) 编译并运行，因“有进程记录时保留原始执行状态”断言失败。该失败来自真实代码行为，没有发布测试包。
 - 新增回归覆盖原始状态/不可读状态、设备时区、根别名与越界输入、四级目录与大小批次、数据库关联内容保留、预检后根被链接替换。原有新增数据库、原地变化、取消、失败阶段与 NSURLCache 恢复测试继续保留。
+- 时间验证按 [Apple 的 localTimeZone 文档](https://developer.apple.com/documentation/foundation/nstimezone/local) 修正：iOS 11/macOS 10.13 起该属性跟随系统时区，修改进程默认时区不改变它。用注入时区的实际格式器验证上海、洛杉矶与跨日，再用独立 Calendar 结果核对设备入口；不修改机器时区。
 - Windows 不能执行 macOS Foundation 原生回归；实际测试、Theos 编译和 deb 文件验收由本次提交对应的 GitHub Actions 完成，以最终成功运行和 Release 为交付证据。
 - `errno 22` 的旧截图没有区分路径边界校验与真实 unlinkat 失败。新仓库的说明也没有提供可独立核验的原始真机回执；不能仅凭这些文字断言该设备根因已修复。当前保留失败阶段、errno 与路径样本，需在设备上核对。
 - iOS 16.2 抖音、RootHide 私有接口、实际清理收益与 Filza 定位仍需真机验证。本次不把云端测试成功当作设备功能验收。

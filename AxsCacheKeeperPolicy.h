@@ -229,14 +229,17 @@ static inline BOOL axs_cachekeeper_can_clean(NSDictionary *directories, NSDictio
         axs_cachekeeper_app_enabled(states[bundle]) && axs_cachekeeper_wants_cleanup(states[bundle]) &&
         (axs_cachekeeper_selected_paths(directories,states,bundle).count > 0 || axs_cachekeeper_auto_discover(states[bundle]));
 }
-static inline NSString *axs_cachekeeper_time_string(id value) {
+static inline NSString *axs_cachekeeper_format_time(id value, NSTimeZone *zone) {
     if (![value isKindOfClass:NSDate.class]) return @"时间未知";
     NSDateFormatter *formatter=[NSDateFormatter new];
     formatter.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
     formatter.calendar=[[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
     formatter.dateFormat=@"yyyy-MM-dd HH:mm:ss";
-    formatter.timeZone=NSTimeZone.localTimeZone;
+    formatter.timeZone=zone;
     return [formatter stringFromDate:value];
+}
+static inline NSString *axs_cachekeeper_time_string(id value) {
+    return axs_cachekeeper_format_time(value,NSTimeZone.localTimeZone);
 }
 static inline NSString *axs_cachekeeper_summary(NSDictionary *scan, NSDictionary *report) {
     NSMutableArray *parts = [NSMutableArray new];

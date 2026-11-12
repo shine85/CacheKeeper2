@@ -151,9 +151,16 @@ int main(int argc, const char *argv[]) {
         require([summary containsString:@"1 个"] && [summary containsString:@"3 个"] && [summary containsString:@"限写失败"], @"检测与清理结果同时可见");
         NSTimeZone *previousZone=NSTimeZone.defaultTimeZone;
         [NSTimeZone setDefaultTimeZone:[NSTimeZone timeZoneWithName:@"Asia/Shanghai"]];
-        NSString *localSummary=axs_cachekeeper_summary(nil,@{@"updated":[NSDate dateWithTimeIntervalSince1970:0]});
-        require([localSummary containsString:@"1970-01-01 08:00:00"] && ![localSummary containsString:@"+0000"],
-            [NSString stringWithFormat:@"清理回执显示设备本地时间（actual=%@; default=%@; local=%@; system=%@）",localSummary,NSTimeZone.defaultTimeZone,NSTimeZone.localTimeZone,NSTimeZone.systemTimeZone]);
+        NSDate *epoch=[NSDate dateWithTimeIntervalSince1970:0];
+        require([axs_cachekeeper_format_time(epoch,[NSTimeZone timeZoneWithName:@"Asia/Shanghai"]) isEqual:@"1970-01-01 08:00:00"] &&
+            [axs_cachekeeper_format_time(epoch,[NSTimeZone timeZoneWithName:@"America/Los_Angeles"]) isEqual:@"1969-12-31 16:00:00"], @"实际格式器支持正负时差与跨日，不能使用 UTC 日期描述");
+        NSCalendar *deviceCalendar=[[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        deviceCalendar.timeZone=NSTimeZone.localTimeZone;
+        NSDateComponents *deviceParts=[deviceCalendar components:NSCalendarUnitYear|NSCalendarUnitMonth|NSCalendarUnitDay|NSCalendarUnitHour|NSCalendarUnitMinute|NSCalendarUnitSecond fromDate:epoch];
+        NSString *deviceTime=[NSString stringWithFormat:@"%04ld-%02ld-%02ld %02ld:%02ld:%02ld",(long)deviceParts.year,(long)deviceParts.month,(long)deviceParts.day,(long)deviceParts.hour,(long)deviceParts.minute,(long)deviceParts.second];
+        NSString *localSummary=axs_cachekeeper_summary(nil,@{@"updated":epoch});
+        require([localSummary containsString:deviceTime] && ![localSummary containsString:@"+0000"],
+            [NSString stringWithFormat:@"回执跟随设备时区而非进程默认时区（actual=%@; expected=%@）",localSummary,deviceTime]);
         [NSTimeZone setDefaultTimeZone:previousZone];
         require([axs_cachekeeper_time_string(@"broken date") isEqual:@"时间未知"], @"损坏时间字段显示未知而非伪造时间");
         NSArray *pathAliases=@[@"/private/var/example/cache",@"/var/example/cache"];
